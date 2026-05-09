@@ -1,0 +1,40 @@
+services:
+  referee-engine:
+    build:
+      context: ./referee-engine
+    container_name: openclaw-referee
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - referee_data:/app/data
+    environment:
+      - OPENCLAW_DB_PATH=/app/data/openclaw.db
+      - OPENCLAW_TEMPLATES_PATH=/app/data/templates.json
+      - TZ=Asia/Shanghai
+      # 允许跨域（如果有直接访问后端的需要）
+      - CORS_ORIGINS=*
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    networks:
+      - openclaw_net
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: openclaw-frontend
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "80:80"
+    depends_on:
+      - referee-engine
+    restart: unless-stopped
+    networks:
+      - openclaw_net
+
+volumes:
+  referee_data:
+
+networks:
+  openclaw_net:
+    driver: bridge

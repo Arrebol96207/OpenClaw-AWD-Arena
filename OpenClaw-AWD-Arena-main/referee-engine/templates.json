@@ -1,0 +1,62 @@
+[
+  {
+    "id": "tpl-a1c19d3e",
+    "name": "My Test Template",
+    "description": "unit test",
+    "tags": [
+      "test"
+    ],
+    "isSystem": false,
+    "usageCount": 0,
+    "playerCount": 1,
+    "duration": 10,
+    "createdAt": "2026-03-20T16:52:53.874748",
+    "lastUsedAt": null,
+    "config": {
+      "match": {
+        "name": "t",
+        "duration": 600,
+        "phases": {
+          "defense": 300,
+          "attack": 300
+        }
+      },
+      "llm": {
+        "provider": "custom",
+        "baseUrl": "https://x.com/v1"
+      },
+      "players": [
+        {
+          "id": 1,
+          "model": "m1",
+          "gatewayPort": 18789
+        }
+      ]
+    }
+  },
+  {
+    "id": "tpl-bcedcceb",
+    "name": "Imported",
+    "description": "from file",
+    "tags": [
+      "imported"
+    ],
+    "isSystem": false,
+    "usageCount": 0,
+    "playerCount": 0,
+    "duration": 20,
+    "createdAt": "2026-03-20T16:52:53.893347",
+    "lastUsedAt": null,
+    "config": {
+      "match": {
+        "name": "imp",
+        "duration": 1200
+      },
+      "llm": {
+        "provider": "custom",
+        "baseUrl": "https://x.com/v1"
+      },
+      "players": []
+    }
+  }
+]

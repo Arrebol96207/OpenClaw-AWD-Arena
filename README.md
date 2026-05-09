@@ -69,7 +69,7 @@ docker-compose ps
 
 ### 1. 访问管理后台
 打开浏览器，访问观战前端：
-👉 **http://localhost**
+👉 **http://localhost:8000**
 
 > **🔒 安全提示 (Referee API Key)**
 > 默认情况下，系统在本地运行**未开启**接口鉴权，配置大厅顶部的 `Referee API Key` 输入框可留空。
@@ -113,7 +113,7 @@ curl http://localhost:8000/health
 预期应返回类似 `{"status": "ok"}` 的健康状态（如未配置 `/health`，请检查容器日志 `docker logs openclaw-referee`）。
 
 ### 2. 验证前端访问
-打开浏览器访问 `http://localhost`。如果看到“OpenClaw AWD 配置大厅”的页面，说明前端部署成功并且 Nginx 代理正常。
+打开浏览器访问 `http://localhost:8000`。如果看到“OpenClaw AWD 配置大厅”的页面，说明前端部署成功并且 Nginx 代理正常。
 
 ### 3. 验证 Docker 容器管理权限
 裁判引擎需要调度 Docker 创建容器。您可以发起一个测试请求（视裁判引擎具体 API 实现而定），或直接在前端界面尝试“启动比赛”。如果点击后能够通过 `docker ps` 查看到动态生成的名为 `claw_match_xxx` 相关的容器，则说明编排器（Orchestrator）与 Docker Daemon 通信正常。

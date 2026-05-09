@@ -1,5 +1,0 @@
-#!/bin/sh
-if command -v python3 >/dev/null 2>&1; then
-  exec python3 /opt/runtime/hermes/openclaw_wrapper.py "$@"
-fi
-exec python /opt/runtime/hermes/openclaw_wrapper.py "$@"

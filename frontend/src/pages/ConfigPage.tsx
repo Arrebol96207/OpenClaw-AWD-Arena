@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronDown, FileDown, Play, Save, Upload } from 'lucide-react'
+import { ChevronDown, Play } from 'lucide-react'
 import { API_BASE, fetchApi, fetchJson, readApiError } from '../api'
 import { Button, Card, CollapsiblePanel, ErrorBanner, Field, StatusBadge, cx, inputClassName } from '../components/ui'
 import { useProtectedApiAccess } from '../hooks/useProtectedApiAccess'
@@ -679,16 +679,21 @@ const ConfigPage: React.FC = () => {
         {modelOptions.map((model) => <option key={model} value={model} />)}
       </datalist>
 
-      {/* Page Header - Linear style */}
-      <div className="mb-8 flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-neutral-50">新建比赛</h1>
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={autoFillNames}>自动命名</Button>
-          <Button variant="ghost" size="sm" disabled={isStarting} onClick={() => resetToConfig(defaultConfig())}>重置</Button>
-          <div className="mx-2 h-4 w-px bg-neutral-800" />
-          <Button variant="primary" icon={<Play className="h-3.5 w-3.5" />} loading={isStarting} disabled={!canStart || apiActionsDisabled} onClick={startMatch}>
-            {isStarting ? '创建中...' : '开始比赛'}
-          </Button>
+      {/* Page Header */}
+      <div className="mb-8">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-100">新建比赛</h1>
+            <p className="mt-1 text-sm text-slate-400">配置选手、模型和赛制，开始一场可观战的比赛</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={autoFillNames}>自动命名</Button>
+            <Button variant="ghost" size="sm" disabled={isStarting} onClick={() => resetToConfig(defaultConfig())}>重置</Button>
+            <div className="mx-2 h-5 w-px bg-slate-700" />
+            <Button variant="primary" icon={<Play className="h-4 w-4" />} loading={isStarting} disabled={!canStart || apiActionsDisabled} onClick={startMatch}>
+              {isStarting ? '创建中...' : '开始比赛'}
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -696,39 +701,41 @@ const ConfigPage: React.FC = () => {
       <ErrorBanner message={importError} />
       <ErrorBanner message={!protectedApi.loading && !protectedApi.ready ? protectedApi.message : null} />
       {templateNotice && (
-        <div role="status" className="mb-4 rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-emerald-400">
+        <div role="status" className="mb-4 rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-3 py-2 text-sm text-emerald-400">
           {templateNotice}
         </div>
       )}
 
-      {/* Mode Selection - Linear style section */}
-      <div className="mb-6">
-        <label className="mb-2 block text-xs font-medium text-neutral-500">比赛模式</label>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className={cx(
-              'rounded-lg px-4 py-2 text-sm font-medium transition-colors',
-              config.mode === 'awd'
-                ? 'bg-neutral-100 text-neutral-900'
-                : 'text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200',
-            )}
-            onClick={() => resetToConfig(defaultConfig())}
-          >
-            AWD 攻防
-          </button>
-          <button
-            type="button"
-            className={cx(
-              'rounded-lg px-4 py-2 text-sm font-medium transition-colors',
-              config.mode === 'werewolf'
-                ? 'bg-neutral-100 text-neutral-900'
-                : 'text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200',
-            )}
-            onClick={() => resetToConfig(werewolfConfig())}
-          >
-            狼人杀
-          </button>
+      {/* Mode Selection */}
+      <Card className="mb-5">
+        <label className="mb-3 block text-xs font-medium text-slate-400 uppercase tracking-wider">比赛模式</label>
+        <div className="flex items-center gap-3">
+          <div className="flex gap-1.5 p-1 bg-slate-900/60 rounded-xl">
+            <button
+              type="button"
+              className={cx(
+                'rounded-md px-4 py-2 text-sm font-medium transition-all',
+                config.mode === 'awd'
+                  ? 'bg-indigo-500 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200',
+              )}
+              onClick={() => resetToConfig(defaultConfig())}
+            >
+              AWD 攻防
+            </button>
+            <button
+              type="button"
+              className={cx(
+                'rounded-md px-4 py-2 text-sm font-medium transition-all',
+                config.mode === 'werewolf'
+                  ? 'bg-indigo-500 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200',
+              )}
+              onClick={() => resetToConfig(werewolfConfig())}
+            >
+              狼人杀
+            </button>
+          </div>
 
           {!isWerewolf && (
             <>
@@ -759,8 +766,8 @@ const ConfigPage: React.FC = () => {
                   className={cx(
                     'rounded-lg px-3 py-1.5 text-xs font-medium transition-colors',
                     config.werewolfBoard === deck.id
-                      ? 'bg-neutral-800 text-neutral-200'
-                      : 'text-neutral-500 hover:text-neutral-300',
+                      ? 'bg-indigo-500/20 text-indigo-300'
+                      : 'text-slate-500 hover:text-slate-300',
                   )}
                   onClick={() => update('werewolfBoard', deck.id)}
                 >
@@ -770,44 +777,42 @@ const ConfigPage: React.FC = () => {
             </>
           )}
         </div>
-      </div>
+      </Card>
 
-      {/* Basic Info - Linear style form */}
-      <div className="mb-6 grid grid-cols-4 gap-4">
-        <div className="col-span-2">
-          <label className="mb-1.5 block text-xs font-medium text-neutral-500">赛事名称</label>
-          <input
-            className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
-            value={config.matchName}
-            onChange={(e) => update('matchName', e.target.value)}
-            placeholder="输入比赛名称"
-          />
+      {/* Basic Info */}
+      <Card className="mb-5" title="基本信息">
+        <div className="grid grid-cols-4 gap-4">
+          <div className="col-span-2">
+            <label className="mb-1.5 block text-xs font-medium text-slate-500">赛事名称</label>
+            <input
+              className={inputClassName}
+              value={config.matchName}
+              onChange={(e) => update('matchName', e.target.value)}
+              placeholder="输入比赛名称"
+            />
+          </div>
+          {!isWerewolf && (
+            <>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-slate-500">总时长（分钟）</label>
+                <input type="number" min={1} className={inputClassName} value={config.totalDuration} onChange={(e) => update('totalDuration', Number(e.target.value))} />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-slate-500">防御时长（分钟）</label>
+                <input type="number" min={0} className={inputClassName} value={config.defenseDuration} onChange={(e) => update('defenseDuration', Number(e.target.value))} />
+              </div>
+            </>
+          )}
         </div>
-        {!isWerewolf && (
-          <>
-            <div>
-              <label className="mb-1.5 block text-xs font-medium text-neutral-500">总时长（分钟）</label>
-              <input type="number" min={1} className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.totalDuration} onChange={(e) => update('totalDuration', Number(e.target.value))} />
-            </div>
-            <div>
-              <label className="mb-1.5 block text-xs font-medium text-neutral-500">防御时长（分钟）</label>
-              <input type="number" min={0} className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.defenseDuration} onChange={(e) => update('defenseDuration', Number(e.target.value))} />
-            </div>
-          </>
-        )}
-      </div>
+      </Card>
 
-      {/* LLM Config - Linear style collapsible */}
-      <details className="mb-6 group">
-        <summary className="flex cursor-pointer items-center gap-2 text-sm font-medium text-neutral-400 hover:text-neutral-200">
-          <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
-          LLM 配置
-        </summary>
-        <div className="mt-4 grid grid-cols-2 gap-4">
+      {/* LLM Config */}
+      <CollapsiblePanel title="LLM 配置" description="设置 AI 模型服务商和密钥" className="mb-5">
+        <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-neutral-500">服务商</label>
+            <label className="mb-1.5 block text-xs font-medium text-slate-500">服务商</label>
             <select
-              className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
+              className={inputClassName}
               value={(() => {
                 const matched = LLM_PRESETS.find((p) => p.baseUrl === config.llmBaseUrl)
                 return matched ? matched.id : 'custom'
@@ -831,17 +836,17 @@ const ConfigPage: React.FC = () => {
             </select>
           </div>
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-neutral-500">Base URL</label>
-            <input className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.llmBaseUrl} onChange={(e) => update('llmBaseUrl', e.target.value)} placeholder="https://api.deepseek.com" />
+            <label className="mb-1.5 block text-xs font-medium text-slate-500">Base URL</label>
+            <input className={inputClassName} value={config.llmBaseUrl} onChange={(e) => update('llmBaseUrl', e.target.value)} placeholder="https://api.deepseek.com" />
           </div>
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-neutral-500">API Key</label>
-            <input type="password" className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.llmApiKey ?? ''} onChange={(e) => update('llmApiKey', e.target.value)} />
+            <label className="mb-1.5 block text-xs font-medium text-slate-500">API Key</label>
+            <input type="password" className={inputClassName} value={config.llmApiKey ?? ''} onChange={(e) => update('llmApiKey', e.target.value)} />
           </div>
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-neutral-500">代理 URL</label>
+            <label className="mb-1.5 block text-xs font-medium text-slate-500">代理 URL</label>
             <div className="flex gap-2">
-              <input className="flex-1 rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.llmProxy ?? ''} onChange={(e) => update('llmProxy', e.target.value)} />
+              <input className={cx(inputClassName, 'flex-1')} value={config.llmProxy ?? ''} onChange={(e) => update('llmProxy', e.target.value)} />
               <Button variant="secondary" size="sm" loading={testingGlobalLlm} disabled={apiActionsDisabled}
                 onClick={() => testLlm(config.llmBaseUrl, config.llmApiKey ?? '', config.llmProxy, config.players[0]?.model || DEFAULT_LLM_MODEL, true)}>
                 测试
@@ -850,47 +855,34 @@ const ConfigPage: React.FC = () => {
             {testStatus.global && <StatusBadge tone={statusTone(testStatus.global.success)} className="mt-1.5">{testStatus.global.message}</StatusBadge>}
           </div>
         </div>
-      </details>
+      </CollapsiblePanel>
 
-      {/* Players - Linear style list */}
-      <div className="mb-6">
-        <div className="mb-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="text-sm font-medium text-neutral-400">选手</span>
-            {!isWerewolf && (
-              <div className="flex items-center gap-1">
-                {[2, 4, 6, 8].map((n) => (
-                  <button
-                    key={n}
-                    type="button"
-                    className={cx(
-                      'rounded-md px-2 py-0.5 text-xs font-medium transition-colors',
-                      config.playerCount === n
-                        ? 'bg-neutral-800 text-neutral-200'
-                        : 'text-neutral-600 hover:text-neutral-400',
-                    )}
-                    onClick={() => update('playerCount', n)}
-                  >
-                    {n}
-                  </button>
-                ))}
-              </div>
-            )}
+      {/* Players */}
+      <Card className="mb-5" title="选手配置" action={
+        !isWerewolf ? (
+          <div className="flex gap-1">
+            {[2, 4, 6, 8].map((n) => (
+              <Button key={n} size="sm" variant={config.playerCount === n ? 'primary' : 'ghost'} onClick={() => update('playerCount', n)}>{n}</Button>
+            ))}
           </div>
+        ) : undefined
+      }>
+        <div className="mb-3 flex items-center justify-between">
+          <div></div>
           <Button size="sm" variant="ghost" onClick={useSameModelAll}>统一模型</Button>
         </div>
 
-        <div className="divide-y divide-neutral-800/50 rounded-xl border border-neutral-800/50">
+        <div className="divide-y divide-slate-700/30 rounded-xl bg-slate-800/40 border border-slate-700/30 overflow-hidden">
           {config.players.map((player, idx) => {
             const expanded = expandedPlayers.has(player.id)
             const playerStatus = testStatus[player.id]
             return (
               <div key={player.id}>
                 <div
-                  className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-neutral-800/20"
+                  className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-slate-800/60 transition-colors"
                   onClick={() => togglePlayerExpanded(player.id)}
                 >
-                  <span className="w-6 text-center text-xs font-medium text-neutral-600">{player.id}</span>
+                  <span className="w-6 text-center text-xs font-medium text-slate-500">{player.id}</span>
                   <input
                     className="flex-1 bg-transparent text-sm text-neutral-200 outline-none placeholder:text-neutral-600"
                     value={player.name}
@@ -900,7 +892,7 @@ const ConfigPage: React.FC = () => {
                   />
                   <input
                     list="recent-models"
-                    className="w-56 bg-transparent text-right text-sm text-neutral-500 outline-none placeholder:text-neutral-700"
+                    className="w-56 bg-transparent text-right text-sm text-slate-500 outline-none placeholder:text-slate-300"
                     value={player.model}
                     onChange={(e) => updatePlayer(idx, { model: e.target.value })}
                     onFocus={() => setModelApplyTarget(player.id)}
@@ -919,37 +911,37 @@ const ConfigPage: React.FC = () => {
                   >
                     测试
                   </Button>
-                  <ChevronDown className={cx('h-4 w-4 text-neutral-600 transition-transform', expanded && 'rotate-180')} />
+                  <ChevronDown className={cx('h-4 w-4 text-slate-400 transition-transform', expanded && 'rotate-180')} />
                 </div>
 
                 {expanded && (
-                  <div className="border-t border-neutral-800/50 bg-neutral-900/50 px-4 py-4">
+                  <div className="border-t border-slate-700/30 bg-slate-800/30 px-4 py-4">
                     <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <label className="mb-1.5 block text-xs font-medium text-neutral-500">Base URL</label>
+                        <label className="mb-1.5 block text-xs font-medium text-slate-500">Base URL</label>
                         <input
-                          className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
+                          className={inputClassName}
                           placeholder={config.llmBaseUrl || DEFAULT_LLM_BASE_URL}
                           value={player.baseUrl ?? ''}
                           onChange={(e) => updatePlayer(idx, { baseUrl: e.target.value })}
                         />
                       </div>
                       <div>
-                        <label className="mb-1.5 block text-xs font-medium text-neutral-500">API Key</label>
-                        <input type="password" className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={player.apiKey ?? ''} onChange={(e) => updatePlayer(idx, { apiKey: e.target.value })} />
+                        <label className="mb-1.5 block text-xs font-medium text-slate-500">API Key</label>
+                        <input type="password" className={inputClassName} value={player.apiKey ?? ''} onChange={(e) => updatePlayer(idx, { apiKey: e.target.value })} />
                       </div>
                       <div>
-                        <label className="mb-1.5 block text-xs font-medium text-neutral-500">后端</label>
-                        <select className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={player.backendType} onChange={(e) => updatePlayer(idx, { backendType: e.target.value as Player['backendType'] })}>
+                        <label className="mb-1.5 block text-xs font-medium text-slate-500">后端</label>
+                        <select className={inputClassName} value={player.backendType} onChange={(e) => updatePlayer(idx, { backendType: e.target.value as Player['backendType'] })}>
                           <option value="openclaw">OpenClaw</option>
                           <option value="hermes">Hermes</option>
                         </select>
                       </div>
                       {player.backendType === 'hermes' && (
                         <div>
-                          <label className="mb-1.5 block text-xs font-medium text-neutral-500">Hermes 镜像</label>
+                          <label className="mb-1.5 block text-xs font-medium text-slate-500">Hermes 镜像</label>
                           <input
-                            className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
+                            className={inputClassName}
                             placeholder="hermes-agent:latest"
                             value={player.backendConfig.image ?? ''}
                             onChange={(e) => updatePlayer(idx, { backendConfig: { ...player.backendConfig, image: e.target.value } })}
@@ -968,63 +960,59 @@ const ConfigPage: React.FC = () => {
             )
           })}
         </div>
-      </div>
+      </Card>
 
-      {/* Advanced - Linear style collapsible */}
-      <details className="group">
-        <summary className="flex cursor-pointer items-center gap-2 text-sm font-medium text-neutral-500 hover:text-neutral-300">
-          <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
-          高级配置
-        </summary>
-        <div className="mt-4 grid grid-cols-3 gap-4">
+      {/* Advanced Config */}
+      <CollapsiblePanel title="高级配置" description="计分规则、镜像等">
+        <div className="grid grid-cols-3 gap-4">
           {!isWerewolf && (
             <>
               <div>
-                <label className="mb-1.5 block text-xs font-medium text-neutral-500">攻击得分</label>
-                <input type="number" className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.scoring?.attackSuccess ?? 100} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), attackSuccess: Number(e.target.value) } }))} />
+                <label className="mb-1.5 block text-xs font-medium text-slate-500">攻击得分</label>
+                <input type="number" className={inputClassName} value={config.scoring?.attackSuccess ?? 100} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), attackSuccess: Number(e.target.value) } }))} />
               </div>
               <div>
-                <label className="mb-1.5 block text-xs font-medium text-neutral-500">防御失分</label>
-                <input type="number" className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.scoring?.defenseFailure ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), defenseFailure: Number(e.target.value) } }))} />
+                <label className="mb-1.5 block text-xs font-medium text-slate-500">防御失分</label>
+                <input type="number" className={inputClassName} value={config.scoring?.defenseFailure ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), defenseFailure: Number(e.target.value) } }))} />
               </div>
               <div>
-                <label className="mb-1.5 block text-xs font-medium text-neutral-500">SLA 失分</label>
-                <input type="number" className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.scoring?.slaViolation ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), slaViolation: Number(e.target.value) } }))} />
+                <label className="mb-1.5 block text-xs font-medium text-slate-500">SLA 失分</label>
+                <input type="number" className={inputClassName} value={config.scoring?.slaViolation ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), slaViolation: Number(e.target.value) } }))} />
               </div>
             </>
           )}
           {!isWerewolf && (
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-neutral-500">Flag 刷新（分钟）</label>
-              <input type="number" min={1} className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.flagsRefreshInterval ?? 5} onChange={(e) => update('flagsRefreshInterval', Number(e.target.value))} />
+              <label className="mb-1.5 block text-xs font-medium text-slate-500">Flag 刷新（分钟）</label>
+              <input type="number" min={1} className={inputClassName} value={config.flagsRefreshInterval ?? 5} onChange={(e) => update('flagsRefreshInterval', Number(e.target.value))} />
             </div>
           )}
           {!isWerewolf && (
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-neutral-500">Target 镜像</label>
-              <input className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.targetImage ?? ''} onChange={(e) => update('targetImage', e.target.value)} />
+              <label className="mb-1.5 block text-xs font-medium text-slate-500">Target 镜像</label>
+              <input className={inputClassName} value={config.targetImage ?? ''} onChange={(e) => update('targetImage', e.target.value)} />
             </div>
           )}
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-neutral-500">Agent 镜像</label>
-            <input className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.agentImage ?? ''} onChange={(e) => update('agentImage', e.target.value)} />
+            <label className="mb-1.5 block text-xs font-medium text-slate-500">Agent 镜像</label>
+            <input className={inputClassName} value={config.agentImage ?? ''} onChange={(e) => update('agentImage', e.target.value)} />
           </div>
         </div>
-      </details>
+      </CollapsiblePanel>
 
       {/* Save Modal */}
       {showSave && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-xl border border-neutral-800 bg-neutral-900 p-6">
-            <h2 className="text-base font-semibold text-neutral-100">保存为模板</h2>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-6">
+            <h2 className="text-base font-semibold text-slate-100">保存为模板</h2>
             <div className="mt-5 space-y-4">
               <div>
-                <label className="mb-1.5 block text-xs font-medium text-neutral-500">名称</label>
-                <input className="w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={saveName} onChange={(e) => setSaveName(e.target.value)} />
+                <label className="mb-1.5 block text-xs font-medium text-slate-500">名称</label>
+                <input className={inputClassName} value={saveName} onChange={(e) => setSaveName(e.target.value)} />
               </div>
               <div>
-                <label className="mb-1.5 block text-xs font-medium text-neutral-500">描述</label>
-                <textarea className="w-full resize-none rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" rows={3} value={saveDesc} onChange={(e) => setSaveDesc(e.target.value)} />
+                <label className="mb-1.5 block text-xs font-medium text-slate-500">描述</label>
+                <textarea className={cx(inputClassName, 'resize-none')} rows={3} value={saveDesc} onChange={(e) => setSaveDesc(e.target.value)} />
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <Button variant="ghost" disabled={isSavingTemplate} onClick={() => setShowSave(false)}>取消</Button>

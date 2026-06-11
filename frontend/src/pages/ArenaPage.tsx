@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Brain, CheckCircle2, Clock, Crown, ListChecks, Network, Radio, ShieldAlert, ShieldCheck, Square, Trophy, XCircle } from 'lucide-react'
 import { API_BASE, buildWebSocketUrl, createWebSocketTicket, fetchApi, fetchMatchEvents, readApiError } from '../api'
@@ -778,6 +778,7 @@ const ArenaPage: React.FC = () => {
   useEffect(() => {
     let cancelled = false
     let reconnectAttempt = 0
+    const MAX_RECONNECT_ATTEMPTS = 10
 
     const clearReconnectTimer = () => {
       if (reconnectTimerRef.current != null) {
@@ -788,6 +789,10 @@ const ArenaPage: React.FC = () => {
 
     const scheduleReconnect = () => {
       if (cancelled || matchEndedRef.current || matchNotFoundRef.current) return
+      if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+        setArenaError('WebSocket 连接失败，请刷新页面重试')
+        return
+      }
       clearReconnectTimer()
       const delay = Math.min(5000, 1000 * 2 ** reconnectAttempt)
       reconnectAttempt += 1
@@ -828,7 +833,8 @@ const ArenaPage: React.FC = () => {
 
       socket.onmessage = (ev: MessageEvent) => {
         try {
-          const data = JSON.parse(ev.data as string) as WsMessage
+          if (typeof ev.data !== 'string') return
+          const data = JSON.parse(ev.data) as WsMessage
           const eventType = data?.type
           if (!eventType) return
           if (typeof data.match_id === 'string' && matchId && data.match_id !== matchId) return
@@ -960,30 +966,50 @@ const ArenaPage: React.FC = () => {
   const readyCount = readyPlayers.size
   const isInitPhase = phase === 'creating_containers' || phase === 'initializing_agents'
   const isWerewolf = matchInfo?.mode === 'werewolf'
-  const werewolfState = buildWerewolfState(matchInfo?.recent_events as MatchEvent[] | undefined ?? [], matchInfo?.werewolf)
+
+  const werewolfState = useMemo(
+    () => buildWerewolfState(matchInfo?.recent_events as MatchEvent[] | undefined ?? [], matchInfo?.werewolf),
+    [matchInfo?.recent_events, matchInfo?.werewolf]
+  )
   const werewolfBoardLabel = matchInfo?.werewolf?.board_label ?? matchInfo?.werewolf_board_label ?? '12 人预女猎守'
-  const werewolfObs = buildWerewolfObservations(matchInfo?.recent_events as MatchEvent[] | undefined ?? [])
-  // Map: player_id → most recent speech text (for round-table hover tooltips)
-  const latestSpeechByPlayer: Record<number, WerewolfSpeechItem> = {}
-  for (const s of werewolfObs.speeches) {
-    // speeches is already reverse-chronological (newest first), so keep the first hit per player
-    if (!(s.player_id in latestSpeechByPlayer)) latestSpeechByPlayer[s.player_id] = s
-  }
+  const werewolfObs = useMemo(
+    () => buildWerewolfObservations(matchInfo?.recent_events as MatchEvent[] | undefined ?? []),
+    [matchInfo?.recent_events]
+  )
+
+  const latestSpeechByPlayer = useMemo(() => {
+    const map: Record<number, WerewolfSpeechItem> = {}
+    for (const s of werewolfObs.speeches) {
+      if (!(s.player_id in map)) map[s.player_id] = s
+    }
+    return map
+  }, [werewolfObs.speeches])
+
   const currentTurn = werewolfObs.currentTurn
   const wwLeaderboard = leaderboard as WerewolfLeaderboardEntry[]
-  const playerLabelById = new Map(leaderboard.map((row) => [row.player_id, computePlayerLabel(row)]))
-  const recentSubmissions = submissions
-    .slice()
-    .sort((a, b) => {
+
+  const playerLabelById = useMemo(
+    () => new Map(leaderboard.map((row) => [row.player_id, computePlayerLabel(row)])),
+    [leaderboard]
+  )
+
+  const recentSubmissions = useMemo(
+    () => submissions.slice().sort((a, b) => {
       const aTime = typeof a.timestamp === 'string' ? eventTime(a.timestamp) : 0
       const bTime = typeof b.timestamp === 'string' ? eventTime(b.timestamp) : 0
       return bTime - aTime
-    })
+    }),
+    [submissions]
+  )
+
   const recentSubmissionsViewportClass = 'h-[15rem] overflow-x-auto overflow-y-auto overscroll-contain'
   const selectedPlayerBubbles = selectedPlayerLog !== null && agentLogs[selectedPlayerLog]
     ? buildAgentBubbles(agentLogs[selectedPlayerLog], streamViewMode)
     : []
-  const onlinePlayers = leaderboard.filter((row) => row.sla_ok).length
+  const onlinePlayers = useMemo(
+    () => leaderboard.filter((row) => row.sla_ok).length,
+    [leaderboard]
+  )
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 p-4">

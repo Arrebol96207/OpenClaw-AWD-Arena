@@ -24,3 +24,5 @@ output/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+.mimocode/

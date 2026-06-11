@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bot, CheckCircle2, FileDown, Play, RotateCcw, Save, Upload, Wand2, Zap } from 'lucide-react'
+import { ChevronDown, FileDown, Play, Save, Upload } from 'lucide-react'
 import { API_BASE, fetchApi, fetchJson, readApiError } from '../api'
-import { Button, ErrorBanner, Field, Panel, StatusBadge, cx, inputClassName } from '../components/ui'
+import { Button, CollapsiblePanel, ErrorBanner, Field, Panel, StatusBadge, cx, inputClassName } from '../components/ui'
 import { useProtectedApiAccess } from '../hooks/useProtectedApiAccess'
 
 type Template = {
@@ -255,6 +255,7 @@ const ConfigPage: React.FC = () => {
   const [testStatus, setTestStatus] = useState<Partial<Record<number | 'global', { success: boolean; message: string }>>>({})
   const [recentModels, setRecentModels] = useState<string[]>([])
   const [modelApplyTarget, setModelApplyTarget] = useState<number | 'all'>(1)
+  const [expandedPlayers, setExpandedPlayers] = useState<Set<number>>(new Set())
   const [config, setConfig] = useState<ConfigState>(() => defaultConfig())
 
   const attackDuration = Math.max(0, config.totalDuration - config.defenseDuration)
@@ -370,6 +371,16 @@ const ConfigPage: React.FC = () => {
     setTestStatus({})
     setTestingGlobalLlm(false)
     setTestingPlayerId(null)
+    setExpandedPlayers(new Set())
+  }
+
+  const togglePlayerExpanded = (playerId: number) => {
+    setExpandedPlayers((prev) => {
+      const next = new Set(prev)
+      if (next.has(playerId)) next.delete(playerId)
+      else next.add(playerId)
+      return next
+    })
   }
 
   const resetToConfig = (nextConfig: ConfigState) => {
@@ -663,26 +674,18 @@ const ConfigPage: React.FC = () => {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <datalist id="recent-models">
         {modelOptions.map((model) => <option key={model} value={model} />)}
       </datalist>
 
-      <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-wider text-cyan-300">Match Control</div>
-          <h1 className="mt-1 text-2xl font-semibold text-white">配置大厅</h1>
-          <p className="mt-1 text-sm text-slate-400">配置选手、模型、赛制和镜像，然后发起一场可观战的比赛。</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" icon={<Wand2 className="h-4 w-4" />} onClick={autoFillNames}>
-            自动生成名称
-          </Button>
-          <Button variant="secondary" icon={<RotateCcw className="h-4 w-4" />} disabled={isStarting} onClick={() => resetToConfig(defaultConfig())}>
-            重置
-          </Button>
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-medium text-slate-200">配置</h1>
+        <div className="flex gap-2">
+          <Button variant="ghost" size="sm" onClick={autoFillNames}>自动命名</Button>
+          <Button variant="ghost" size="sm" disabled={isStarting} onClick={() => resetToConfig(defaultConfig())}>重置</Button>
           <Button variant="primary" icon={<Play className="h-4 w-4" />} loading={isStarting} disabled={!canStart || apiActionsDisabled} onClick={startMatch}>
-            {isStarting ? '创建中...' : config.repeatCount > 1 ? '开始循环比赛' : '开始比赛'}
+            {isStarting ? '创建中...' : '开始比赛'}
           </Button>
         </div>
       </div>
@@ -691,389 +694,256 @@ const ConfigPage: React.FC = () => {
       <ErrorBanner message={importError} />
       <ErrorBanner message={!protectedApi.loading && !protectedApi.ready ? protectedApi.message : null} />
       {templateNotice && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="rounded-md border border-emerald-500/40 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-100"
-        >
+        <div role="status" className="rounded border border-emerald-500/30 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-200">
           {templateNotice}
         </div>
       )}
 
-      <Panel title="比赛模式" eyebrow="Mode">
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant={config.mode === 'awd' ? 'primary' : 'secondary'}
-            onClick={() => {
-              resetToConfig(defaultConfig())
-            }}
-          >
-            AWD 攻防战
-          </Button>
-          <Button
-            variant={config.mode === 'werewolf' ? 'primary' : 'secondary'}
-            onClick={() => {
-              resetToConfig(werewolfConfig())
-            }}
-          >
-            12 人狼人杀
-          </Button>
-          <StatusBadge tone={isWerewolf ? 'warning' : 'info'}>
-            {isWerewolf ? '预女猎守 · 警长 · 自爆 · AI 裁判' : '靶机攻防 · Flag · SLA'}
-          </StatusBadge>
+      <Panel>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex gap-1">
+            <Button size="sm" variant={config.mode === 'awd' ? 'primary' : 'secondary'} onClick={() => resetToConfig(defaultConfig())}>AWD</Button>
+            <Button size="sm" variant={config.mode === 'werewolf' ? 'primary' : 'secondary'} onClick={() => resetToConfig(werewolfConfig())}>狼人杀</Button>
+          </div>
+
+          {isWerewolf ? (
+            <div className="flex flex-wrap gap-2">
+              {WEREWOLF_DECKS.map((deck) => (
+                <button
+                  key={deck.id}
+                  type="button"
+                  className={cx(
+                    'rounded px-3 py-1.5 text-xs transition',
+                    config.werewolfBoard === deck.id
+                      ? 'bg-cyan-600 text-white'
+                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700',
+                  )}
+                  onClick={() => update('werewolfBoard', deck.id)}
+                >
+                  {deck.name}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <select
+                className={cx(inputClassName, 'h-8 w-48 text-xs')}
+                value={selectedTemplate}
+                onChange={(e) => applyTemplate(e.target.value)}
+              >
+                <option value="">选择模板</option>
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+              <Button size="sm" variant="ghost" onClick={() => setShowSave(true)}>保存</Button>
+              <Button size="sm" variant="ghost" loading={isImportingTemplate} onClick={() => fileRef.current?.click()}>导入</Button>
+              <input ref={fileRef} type="file" accept="application/json" className="hidden" onChange={onImport} />
+            </div>
+          )}
         </div>
       </Panel>
 
       <Panel>
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          {isWerewolf ? (
-            <div className="w-full space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm text-slate-300">狼人杀卡组</span>
-                <StatusBadge tone="warning">{WEREWOLF_DECKS.length} 个卡组</StatusBadge>
-                <StatusBadge tone="info">{selectedWerewolfDeck.description}</StatusBadge>
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                {WEREWOLF_DECKS.map((deck) => {
-                  const selected = config.werewolfBoard === deck.id
-                  return (
-                    <button
-                      key={deck.id}
-                      type="button"
-                      className={cx(
-                        'rounded-md border p-4 text-left transition duration-200 focus:outline-none focus:ring-2 focus:ring-cyan-400/40',
-                        selected
-                          ? 'border-cyan-400 bg-cyan-950/40 shadow-[0_0_0_1px_rgba(34,211,238,0.35)]'
-                          : 'border-slate-700 bg-slate-900/60 hover:border-slate-500 hover:bg-slate-800/70',
-                      )}
-                      onClick={() => update('werewolfBoard', deck.id)}
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="font-semibold text-slate-100">{deck.name}</div>
-                        <StatusBadge tone={selected ? 'success' : 'neutral'}>{selected ? '已选择' : '可选择'}</StatusBadge>
-                      </div>
-                      <div className="mt-2 text-sm text-slate-300">{deck.description}</div>
-                      <div className="mt-3 text-xs leading-5 text-slate-500">{roleSummary(deck.roles)}</div>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="赛事名称" className="sm:col-span-2 lg:col-span-1">
+            <input className={inputClassName} value={config.matchName} onChange={(e) => update('matchName', e.target.value)} />
+          </Field>
+          {!isWerewolf && (
             <>
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <span className="text-sm text-slate-300">模板管理</span>
-                <select
-                  aria-label="模板管理"
-                  className={cx(inputClassName, 'sm:w-72')}
-                  value={selectedTemplate}
-                  onChange={(e) => applyTemplate(e.target.value)}
-                >
-                  <option value="" disabled>选择模板</option>
-                  {templates.map((template) => (
-                    <option key={template.id} value={template.id}>
-                      {template.name} - {template.playerCount} 选手 / {template.duration} 分钟
-                    </option>
-                  ))}
-                </select>
-                <StatusBadge tone="info">{templates.length ? `${templates.length} 个模板` : '暂无模板'}</StatusBadge>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="secondary" icon={<Save className="h-4 w-4" />} disabled={apiActionsDisabled || isImportingTemplate} onClick={() => setShowSave(true)}>保存为模板</Button>
-                <Button
-                  variant="secondary"
-                  icon={<Upload className="h-4 w-4" />}
-                  loading={isImportingTemplate}
-                  disabled={apiActionsDisabled}
-                  onClick={() => fileRef.current?.click()}
-                >
-                  {isImportingTemplate ? '导入中...' : '导入模板'}
-                </Button>
-                <input ref={fileRef} type="file" accept="application/json" className="hidden" onChange={onImport} />
-              </div>
+              <Field label="总时长（分钟）">
+                <input type="number" min={1} className={inputClassName} value={config.totalDuration} onChange={(e) => update('totalDuration', Number(e.target.value))} />
+              </Field>
+              <Field label="防御（分钟）">
+                <input type="number" min={0} className={inputClassName} value={config.defenseDuration} onChange={(e) => update('defenseDuration', Number(e.target.value))} />
+              </Field>
+              <Field label="循环次数">
+                <input type="number" min={1} className={inputClassName} value={config.repeatCount} onChange={(e) => update('repeatCount', Math.max(1, Number(e.target.value) || 1))} />
+              </Field>
             </>
           )}
         </div>
       </Panel>
 
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-        <Panel title="基础配置" eyebrow="Arena">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <Field label="赛事名称" className={isWerewolf ? 'md:col-span-2' : undefined}>
-              <input className={inputClassName} value={config.matchName} onChange={(e) => update('matchName', e.target.value)} />
-            </Field>
-            {!isWerewolf && (
-              <>
-                <Field label="总时长（分钟）">
-                  <input type="number" min={1} className={inputClassName} value={config.totalDuration} onChange={(e) => update('totalDuration', Number(e.target.value))} />
-                </Field>
-                <Field label="防御时长（分钟）">
-                  <input type="number" min={0} className={inputClassName} value={config.defenseDuration} onChange={(e) => update('defenseDuration', Number(e.target.value))} />
-                </Field>
-                <Field label="攻击时长（分钟）">
-                  <input className={inputClassName} value={attackDuration} readOnly />
-                </Field>
-                <Field label="循环次数">
-                  <input type="number" min={1} className={inputClassName} value={config.repeatCount} onChange={(e) => update('repeatCount', Math.max(1, Number(e.target.value) || 1))} />
-                </Field>
-              </>
-            )}
-            <div className="rounded-md border border-cyan-500/20 bg-cyan-950/30 p-3 text-sm text-cyan-100 md:col-span-2">
-              {isWerewolf
-                ? '狼人杀第一版固定 12 人局，平台会进行赛前训练、发牌、警长竞选、日夜循环、自爆处理和 AI 裁判评分。'
-                : config.repeatCount > 1
-                ? `当前会连续执行 ${config.repeatCount} 场相同配置的比赛，上一场完成并清理后自动进入下一场。`
-                : '循环次数为 1 时，只启动单场比赛。'}
-            </div>
-          </div>
-        </Panel>
-
-        <Panel title="LLM 配置" eyebrow="Gateway">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <Field label="LLM 服务商">
-              <select
-                className={inputClassName}
-                value={(() => {
-                  const matched = LLM_PRESETS.find((p) => p.baseUrl === config.llmBaseUrl)
-                  return matched ? matched.id : 'custom'
-                })()}
-                onChange={(e) => {
-                  const preset = LLM_PRESETS.find((p) => p.id === e.target.value)
-                  if (!preset) return
-                  setConfig((current) => ({
-                    ...current,
-                    llmProvider: preset.provider,
-                    llmBaseUrl: preset.baseUrl,
-                    players: preset.defaultModel
-                      ? current.players.map((p, idx) => idx === 0 ? { ...p, model: preset.defaultModel } : p)
-                      : current.players,
-                  }))
-                }}
-              >
-                {LLM_PRESETS.map((p) => (
-                  <option key={p.id} value={p.id}>{p.label}</option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Base URL">
-              <input className={inputClassName} value={config.llmBaseUrl} onChange={(e) => update('llmBaseUrl', e.target.value)} placeholder="https://api.deepseek.com" />
-            </Field>
-            <Field label="API Key" className="md:col-span-2">
-              <input type="password" className={inputClassName} value={config.llmApiKey ?? ''} onChange={(e) => update('llmApiKey', e.target.value)} />
-            </Field>
-            <Field label="代理 URL">
+      <CollapsiblePanel title="LLM 配置">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="服务商">
+            <select
+              className={inputClassName}
+              value={(() => {
+                const matched = LLM_PRESETS.find((p) => p.baseUrl === config.llmBaseUrl)
+                return matched ? matched.id : 'custom'
+              })()}
+              onChange={(e) => {
+                const preset = LLM_PRESETS.find((p) => p.id === e.target.value)
+                if (!preset) return
+                setConfig((current) => ({
+                  ...current,
+                  llmProvider: preset.provider,
+                  llmBaseUrl: preset.baseUrl,
+                  players: preset.defaultModel
+                    ? current.players.map((p, idx) => idx === 0 ? { ...p, model: preset.defaultModel } : p)
+                    : current.players,
+                }))
+              }}
+            >
+              {LLM_PRESETS.map((p) => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Base URL">
+            <input className={inputClassName} value={config.llmBaseUrl} onChange={(e) => update('llmBaseUrl', e.target.value)} placeholder="https://api.deepseek.com" />
+          </Field>
+          <Field label="API Key">
+            <input type="password" className={inputClassName} value={config.llmApiKey ?? ''} onChange={(e) => update('llmApiKey', e.target.value)} />
+          </Field>
+          <div className="flex items-end gap-2">
+            <Field label="代理 URL" className="flex-1">
               <input className={inputClassName} value={config.llmProxy ?? ''} onChange={(e) => update('llmProxy', e.target.value)} />
             </Field>
-            <div className="flex flex-col justify-end gap-2">
-              <Button
-                variant="primary"
-                icon={<Zap className="h-4 w-4" />}
-                loading={testingGlobalLlm}
-                disabled={apiActionsDisabled}
-                onClick={() => testLlm(config.llmBaseUrl, config.llmApiKey ?? '', config.llmProxy, config.players[0]?.model || DEFAULT_LLM_MODEL, true)}
-              >
-                {testingGlobalLlm ? '测试中...' : '测试全局 API'}
-              </Button>
-              {testStatus.global && (
-                <StatusBadge tone={statusTone(testStatus.global.success)}>
-                  {testStatus.global.message}
-                </StatusBadge>
-              )}
-            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={testingGlobalLlm}
+              disabled={apiActionsDisabled}
+              onClick={() => testLlm(config.llmBaseUrl, config.llmApiKey ?? '', config.llmProxy, config.players[0]?.model || DEFAULT_LLM_MODEL, true)}
+            >
+              测试
+            </Button>
           </div>
-        </Panel>
-      </div>
-
-      <Panel title="选手配置" eyebrow="Players">
-        <div className="mb-4 flex flex-wrap items-center gap-2 text-sm text-slate-300">
-          {!isWerewolf && (
-            <>
-              <span>选手数</span>
-              {[2, 3, 4, 5, 6, 8, 10].map((n) => (
-                <Button key={n} size="sm" variant={config.playerCount === n ? 'primary' : 'secondary'} onClick={() => update('playerCount', n)}>
-                  {n}
-                </Button>
-              ))}
-            </>
+          {testStatus.global && (
+            <div className="sm:col-span-2">
+              <StatusBadge tone={statusTone(testStatus.global.success)}>{testStatus.global.message}</StatusBadge>
+            </div>
           )}
-          <Button size="sm" variant="secondary" onClick={useSameModelAll}>全部使用 P1 模型</Button>
+        </div>
+      </CollapsiblePanel>
+
+      <Panel title="选手">
+        <div className="mb-3 flex items-center gap-2">
+          {!isWerewolf && (
+            <div className="flex gap-1">
+              {[2, 4, 6, 8].map((n) => (
+                <Button key={n} size="sm" variant={config.playerCount === n ? 'primary' : 'secondary'} onClick={() => update('playerCount', n)}>{n}</Button>
+              ))}
+            </div>
+          )}
+          <Button size="sm" variant="ghost" onClick={useSameModelAll}>统一模型</Button>
         </div>
 
-        {trustedModelOptions.length > 0 && (
-          <div className="mb-4 rounded-md border border-slate-800 bg-slate-950/45 p-3">
-            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs uppercase tracking-wider text-slate-500">模型列表</span>
-                <StatusBadge tone="info">{trustedModelOptions.length} 个候选</StatusBadge>
-                {recentModels.length > 0 && <StatusBadge tone="success">最近 {recentModels.length}</StatusBadge>}
-              </div>
-              <label className="flex items-center gap-2 text-xs text-slate-400">
-                应用到
-                <select
-                  className={cx(inputClassName, 'h-8 w-36 py-1 text-xs')}
-                  value={String(modelApplyTarget)}
-                  onChange={(event) => {
-                    const value = event.target.value
-                    setModelApplyTarget(value === 'all' ? 'all' : Number(value))
-                  }}
-                >
-                  <option value="all">全部选手</option>
-                  {config.players.map((player) => (
-                    <option key={player.id} value={player.id}>
-                      P{player.id} {displayModelName(player.model) || player.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {trustedModelOptions.map((model) => (
-                <button
-                  key={model}
-                  type="button"
-                  className={cx(
-                    'cursor-pointer rounded-md border px-2.5 py-1 text-xs transition duration-200 focus:outline-none focus:ring-2 focus:ring-cyan-400/20',
-                    recentModels.includes(model)
-                      ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-100 hover:border-emerald-300/70'
-                      : 'border-slate-700 bg-slate-950/70 text-slate-300 hover:border-cyan-400/60 hover:text-cyan-100',
-                  )}
-                  onClick={() => applyModelFromLibrary(model)}
-                  title={modelApplyTarget === 'all' ? '填入全部选手' : `填入 P${modelApplyTarget}`}
-                >
-                  {model}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div className="space-y-2">
           {config.players.map((player, idx) => {
+            const expanded = expandedPlayers.has(player.id)
             const playerStatus = testStatus[player.id]
             return (
-              <article key={player.id} className="rounded-lg border border-slate-700/80 bg-slate-950/50 p-4">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Bot className="h-4 w-4 text-cyan-300" />
-                    <div className="truncate text-sm font-semibold text-slate-100">{player.name || `Player ${player.id}`}</div>
-                  </div>
-                  <StatusBadge tone={player.backendType === 'openclaw' ? 'info' : 'warning'}>{player.backendType}</StatusBadge>
+              <div key={player.id} className="rounded border border-slate-800 bg-slate-950/50">
+                <div
+                  className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-slate-800/50"
+                  onClick={() => togglePlayerExpanded(player.id)}
+                >
+                  <span className="w-6 text-center text-xs text-slate-500">{player.id}</span>
+                  <input
+                    className={cx(inputClassName, 'h-7 flex-1 border-0 bg-transparent px-0 focus:ring-0')}
+                    value={player.name}
+                    onChange={(e) => updatePlayer(idx, { name: e.target.value })}
+                    onClick={(e) => e.stopPropagation()}
+                    placeholder={`Player ${player.id}`}
+                  />
+                  <input
+                    list="recent-models"
+                    className={cx(inputClassName, 'h-7 w-48 border-0 bg-transparent px-0 text-right focus:ring-0')}
+                    value={player.model}
+                    onChange={(e) => updatePlayer(idx, { model: e.target.value })}
+                    onFocus={() => setModelApplyTarget(player.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    placeholder="模型名称"
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    loading={testingPlayerId === player.id}
+                    disabled={apiActionsDisabled}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      testLlm(player.baseUrl || config.llmBaseUrl, player.apiKey || config.llmApiKey || '', config.llmProxy, player.model, false, player.id)
+                    }}
+                  >
+                    测试
+                  </Button>
+                  <ChevronDown className={cx('h-4 w-4 text-slate-500 transition', expanded && 'rotate-180')} />
                 </div>
 
-                <div className="space-y-3">
-                  <Field label="选手名称">
-                    <input className={inputClassName} value={player.name} onChange={(e) => updatePlayer(idx, { name: e.target.value })} />
-                  </Field>
-                  <Field label="模型">
-                    <div className="flex gap-2">
-                      <input
-                        list="recent-models"
-                        className={inputClassName}
-                        value={player.model}
-                        onFocus={() => setModelApplyTarget(player.id)}
-                        onChange={(e) => updatePlayer(idx, { model: e.target.value })}
-                      />
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        loading={testingPlayerId === player.id}
-                        disabled={apiActionsDisabled}
-                        onClick={() => testLlm(player.baseUrl || config.llmBaseUrl, player.apiKey || config.llmApiKey || '', config.llmProxy, player.model, false, player.id)}
-                      >
-                        {testingPlayerId === player.id ? '测试中' : '测试'}
-                      </Button>
+                {expanded && (
+                  <div className="border-t border-slate-800 px-3 py-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <Field label="Base URL">
+                        <input
+                          className={inputClassName}
+                          placeholder={config.llmBaseUrl || DEFAULT_LLM_BASE_URL}
+                          value={player.baseUrl ?? ''}
+                          onChange={(e) => updatePlayer(idx, { baseUrl: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="API Key">
+                        <input type="password" className={inputClassName} value={player.apiKey ?? ''} onChange={(e) => updatePlayer(idx, { apiKey: e.target.value })} />
+                      </Field>
+                      <Field label="后端">
+                        <select className={inputClassName} value={player.backendType} onChange={(e) => updatePlayer(idx, { backendType: e.target.value as Player['backendType'] })}>
+                          <option value="openclaw">OpenClaw</option>
+                          <option value="hermes">Hermes</option>
+                        </select>
+                      </Field>
+                      {player.backendType === 'hermes' && (
+                        <Field label="Hermes 镜像">
+                          <input
+                            className={inputClassName}
+                            placeholder="hermes-agent:latest"
+                            value={player.backendConfig.image ?? ''}
+                            onChange={(e) => updatePlayer(idx, { backendConfig: { ...player.backendConfig, image: e.target.value } })}
+                          />
+                        </Field>
+                      )}
                     </div>
-                    {playerStatus && <StatusBadge tone={statusTone(playerStatus.success)}>{playerStatus.message}</StatusBadge>}
-                  </Field>
-                  <Field label="Provider/API 类型">
-                    <input
-                      className={inputClassName}
-                      placeholder={config.llmProvider || 'openai-completions'}
-                      value={player.api || player.provider || ''}
-                      onChange={(e) => updatePlayer(idx, { api: e.target.value, provider: e.target.value })}
-                    />
-                  </Field>
-                  <Field label="Base URL">
-                    <input
-                      className={inputClassName}
-                      placeholder={config.llmBaseUrl || DEFAULT_LLM_BASE_URL}
-                      value={player.baseUrl ?? ''}
-                      onChange={(e) => updatePlayer(idx, { baseUrl: e.target.value })}
-                    />
-                  </Field>
-                  <Field label="API Key">
-                    <input type="password" className={inputClassName} value={player.apiKey ?? ''} onChange={(e) => updatePlayer(idx, { apiKey: e.target.value })} />
-                  </Field>
-                  <div className="grid grid-cols-2 gap-3">
-                    <Field label="网关端口">
-                      <input className={inputClassName} value={player.gatewayPort} readOnly />
-                    </Field>
-                    <Field label="后端类型">
-                      <select className={inputClassName} value={player.backendType} onChange={(e) => updatePlayer(idx, { backendType: e.target.value as Player['backendType'] })}>
-                        <option value="openclaw">OpenClaw</option>
-                        <option value="hermes">Hermes</option>
-                      </select>
-                    </Field>
+                    {playerStatus && (
+                      <div className="mt-2">
+                        <StatusBadge tone={statusTone(playerStatus.success)}>{playerStatus.message}</StatusBadge>
+                      </div>
+                    )}
                   </div>
-                  {player.backendType === 'hermes' && (
-                    <div className="space-y-3 border-l-2 border-amber-500/40 pl-3">
-                      <Field label="镜像（Hermes）">
-                        <input
-                          className={inputClassName}
-                          placeholder="hermes-agent:latest"
-                          value={player.backendConfig.image ?? ''}
-                          onChange={(e) => updatePlayer(idx, { backendConfig: { ...player.backendConfig, image: e.target.value } })}
-                        />
-                      </Field>
-                      <Field label="额外环境变量（JSON）">
-                        <input
-                          className={inputClassName}
-                          placeholder='{"KEY":"value"}'
-                          value={JSON.stringify(player.backendConfig.extraEnv ?? {})}
-                          onChange={(e) => {
-                            try {
-                              updatePlayer(idx, { backendConfig: { ...player.backendConfig, extraEnv: JSON.parse(e.target.value) } })
-                            } catch {
-                              return
-                            }
-                          }}
-                        />
-                      </Field>
-                    </div>
-                  )}
-                </div>
-              </article>
+                )}
+              </div>
             )
           })}
         </div>
       </Panel>
 
-      <Panel title="高级配置" eyebrow="Runtime">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <Field label={isWerewolf ? '狼人杀评分' : '计分权重（攻击 / 防御 / SLA）'} className="md:col-span-2">
-            {isWerewolf ? (
-              <div className="rounded-md border border-amber-500/20 bg-amber-950/20 p-3 text-sm text-amber-100">
-                失败阵营固定 0 分；胜利阵营每名玩家由 AI 裁判按个人表现给 0-10 分，5 分已经是高分。
-              </div>
-            ) : (
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-              <input type="number" className={inputClassName} value={config.scoring?.attackSuccess ?? 100} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), attackSuccess: Number(e.target.value) } }))} />
-              <input type="number" className={inputClassName} value={config.scoring?.defenseFailure ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), defenseFailure: Number(e.target.value) } }))} />
-              <input type="number" className={inputClassName} value={config.scoring?.slaViolation ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), slaViolation: Number(e.target.value) } }))} />
-            </div>
-            )}
-          </Field>
-          {!isWerewolf && <Field label="Flag 刷新间隔（分钟）">
-            <input type="number" min={1} className={inputClassName} value={config.flagsRefreshInterval ?? 5} onChange={(e) => update('flagsRefreshInterval', Number(e.target.value))} />
-          </Field>}
-          {!isWerewolf && <Field label="Target 镜像">
-            <input className={inputClassName} value={config.targetImage ?? ''} onChange={(e) => update('targetImage', e.target.value)} />
-          </Field>}
-          <Field label="Agent 镜像" hint="OpenClaw 默认使用带 ssh 客户端的本地镜像。">
+      <CollapsiblePanel title="高级配置">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {!isWerewolf && (
+            <>
+              <Field label="攻击得分">
+                <input type="number" className={inputClassName} value={config.scoring?.attackSuccess ?? 100} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), attackSuccess: Number(e.target.value) } }))} />
+              </Field>
+              <Field label="防御失分">
+                <input type="number" className={inputClassName} value={config.scoring?.defenseFailure ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), defenseFailure: Number(e.target.value) } }))} />
+              </Field>
+              <Field label="SLA 失分">
+                <input type="number" className={inputClassName} value={config.scoring?.slaViolation ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), slaViolation: Number(e.target.value) } }))} />
+              </Field>
+              <Field label="Flag 刷新（分钟）">
+                <input type="number" min={1} className={inputClassName} value={config.flagsRefreshInterval ?? 5} onChange={(e) => update('flagsRefreshInterval', Number(e.target.value))} />
+              </Field>
+              <Field label="Target 镜像">
+                <input className={inputClassName} value={config.targetImage ?? ''} onChange={(e) => update('targetImage', e.target.value)} />
+              </Field>
+            </>
+          )}
+          <Field label="Agent 镜像">
             <input className={inputClassName} value={config.agentImage ?? ''} onChange={(e) => update('agentImage', e.target.value)} />
           </Field>
         </div>
-      </Panel>
+      </CollapsiblePanel>
 
       {showSave && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">

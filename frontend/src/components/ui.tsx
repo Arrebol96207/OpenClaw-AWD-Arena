@@ -1,5 +1,5 @@
-import React from 'react'
-import { Loader2 } from 'lucide-react'
+import React, { useState } from 'react'
+import { ChevronDown, Loader2 } from 'lucide-react'
 
 export const cx = (...classes: Array<string | false | null | undefined>): string =>
   classes.filter(Boolean).join(' ')
@@ -8,19 +8,19 @@ type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'warning' | 'ghost'
 type BadgeTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'
 
 const buttonVariants: Record<ButtonVariant, string> = {
-  primary: 'border-cyan-500/60 bg-cyan-500/90 text-slate-950 hover:bg-cyan-400 focus:ring-cyan-400/40',
-  secondary: 'border-slate-600 bg-slate-800 text-slate-100 hover:bg-slate-700 focus:ring-slate-400/30',
-  danger: 'border-rose-500/60 bg-rose-600/90 text-white hover:bg-rose-500 focus:ring-rose-400/40',
-  warning: 'border-amber-500/60 bg-amber-600/90 text-white hover:bg-amber-500 focus:ring-amber-400/40',
-  ghost: 'border-transparent bg-transparent text-slate-300 hover:bg-slate-800 hover:text-white focus:ring-slate-400/30',
+  primary: 'bg-cyan-600 text-white hover:bg-cyan-500 focus:ring-cyan-400/40',
+  secondary: 'bg-slate-800 text-slate-200 hover:bg-slate-700 focus:ring-slate-400/30',
+  danger: 'bg-rose-600 text-white hover:bg-rose-500 focus:ring-rose-400/40',
+  warning: 'bg-amber-600 text-white hover:bg-amber-500 focus:ring-amber-400/40',
+  ghost: 'bg-transparent text-slate-400 hover:bg-slate-800 hover:text-slate-200 focus:ring-slate-400/30',
 }
 
 export const badgeTones: Record<BadgeTone, string> = {
-  neutral: 'border-slate-600 bg-slate-800/80 text-slate-200',
-  info: 'border-cyan-500/40 bg-cyan-950/50 text-cyan-200',
-  success: 'border-emerald-500/40 bg-emerald-950/50 text-emerald-200',
-  warning: 'border-amber-500/40 bg-amber-950/50 text-amber-200',
-  danger: 'border-rose-500/40 bg-rose-950/50 text-rose-200',
+  neutral: 'bg-slate-800 text-slate-300',
+  info: 'bg-cyan-900/50 text-cyan-300',
+  success: 'bg-emerald-900/50 text-emerald-300',
+  warning: 'bg-amber-900/50 text-amber-300',
+  danger: 'bg-rose-900/50 text-rose-300',
 }
 
 export type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -47,9 +47,9 @@ export const Button: React.FC<ButtonProps> = ({
     aria-busy={loading || undefined}
     {...props}
     className={cx(
-      'inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border font-medium transition-all duration-200',
+      'inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-md font-medium transition',
       'focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50',
-      size === 'sm' ? 'px-2.5 py-1.5 text-xs' : 'px-3.5 py-2 text-sm',
+      size === 'sm' ? 'px-2 py-1 text-xs' : 'px-3 py-1.5 text-sm',
       buttonVariants[variant],
       className,
     )}
@@ -59,26 +59,45 @@ export const Button: React.FC<ButtonProps> = ({
   </button>
 )
 
-export const Panel: React.FC<React.HTMLAttributes<HTMLElement> & { title?: string; eyebrow?: string }> = ({
+export const Panel: React.FC<React.HTMLAttributes<HTMLElement> & { title?: string }> = ({
   title,
-  eyebrow,
   className,
   children,
   ...props
 }) => (
   <section
     {...props}
-    className={cx('rounded-lg border border-slate-700/80 bg-slate-900/70 p-4 shadow-lg shadow-black/10', className)}
+    className={cx('rounded-lg border border-slate-800 bg-slate-900/50 p-4', className)}
   >
-    {(title || eyebrow) && (
-      <div className="mb-4">
-        {eyebrow && <div className="text-xs font-medium uppercase tracking-wider text-cyan-300/80">{eyebrow}</div>}
-        {title && <h2 className="mt-1 text-lg font-semibold text-slate-100">{title}</h2>}
-      </div>
+    {title && (
+      <h2 className="mb-3 text-sm font-medium text-slate-300">{title}</h2>
     )}
     {children}
   </section>
 )
+
+export const CollapsiblePanel: React.FC<{
+  title: string
+  defaultOpen?: boolean
+  className?: string
+  children: React.ReactNode
+}> = ({ title, defaultOpen = false, className, children }) => {
+  const [open, setOpen] = useState(defaultOpen)
+
+  return (
+    <section className={cx('rounded-lg border border-slate-800 bg-slate-900/50', className)}>
+      <button
+        type="button"
+        className="flex w-full items-center justify-between px-4 py-3 text-sm font-medium text-slate-300 hover:bg-slate-800/50"
+        onClick={() => setOpen(!open)}
+      >
+        <span>{title}</span>
+        <ChevronDown className={cx('h-4 w-4 text-slate-500 transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && <div className="border-t border-slate-800 px-4 py-3">{children}</div>}
+    </section>
+  )
+}
 
 export const StatusBadge: React.FC<React.HTMLAttributes<HTMLSpanElement> & { tone?: BadgeTone }> = ({
   tone = 'neutral',
@@ -89,7 +108,7 @@ export const StatusBadge: React.FC<React.HTMLAttributes<HTMLSpanElement> & { ton
   <span
     {...props}
     className={cx(
-      'inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium',
+      'inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs',
       badgeTones[tone],
       className,
     )}
@@ -105,15 +124,15 @@ export const Field: React.FC<React.LabelHTMLAttributes<HTMLLabelElement> & { lab
   children,
   ...props
 }) => (
-  <label {...props} className={cx('block space-y-1.5 text-sm', className)}>
-    <span className="text-slate-300">{label}</span>
+  <label {...props} className={cx('block space-y-1 text-sm', className)}>
+    <span className="text-slate-400">{label}</span>
     {children}
-    {hint && <span className="block text-xs text-slate-500">{hint}</span>}
+    {hint && <span className="block text-xs text-slate-600">{hint}</span>}
   </label>
 )
 
 export const inputClassName =
-  'w-full rounded-md border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 outline-none transition duration-200 placeholder:text-slate-500 focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 disabled:opacity-60'
+  'w-full rounded border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/30 disabled:opacity-60'
 
 export const tableClassName = 'w-full min-w-[760px] text-sm'
 
@@ -123,7 +142,7 @@ export const ErrorBanner: React.FC<{ message: string | null; className?: string 
     <div
       role="alert"
       aria-live="polite"
-      className={cx('rounded-md border border-rose-500/40 bg-rose-950/40 px-3 py-2 text-sm text-rose-100', className)}
+      className={cx('rounded border border-rose-500/30 bg-rose-950/30 px-3 py-2 text-sm text-rose-200', className)}
     >
       {message}
     </div>

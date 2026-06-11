@@ -150,7 +150,7 @@ async def test_build_player_status_includes_leaderboard_summary_and_attack_conte
         "player_id": 1,
         "name": "P1",
         "model": None,
-        "display_name": "P1（P1）",
+        "display_name": "P1 (P1)",
         "ready_status": "AGENT_READY",
         "ready_reason": None,
         "readiness_details": {

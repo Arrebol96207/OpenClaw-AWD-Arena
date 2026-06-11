@@ -31,7 +31,9 @@ COPY supervisord.conf /etc/supervisord.conf
 RUN chmod +x /app/entrypoint.sh && \
     chmod +x /app/flag_sync.sh && \
     mkdir -p /app/static/documents /app/static/backup /app/data /app/reports \
-    /app/reports/templates /var/log/supervisor /opt/.credentials && \
+    /app/reports/templates /app/reports/.bundle-queue /app/reports/.db-audit-queue \
+    /app/reports/.maintenance-queue /app/reports/.template-queue /app/reports/.webhook-queue \
+    /var/log/supervisor /opt/.credentials /var/lib/megacorp /var/lib/megacorp/.job_tokens && \
     chown root:maintops /app && \
     chmod 775 /app && \
     chown defender:webops /app/app.py && \
@@ -48,10 +50,17 @@ RUN chmod +x /app/entrypoint.sh && \
     chmod 700 /app/data && \
     chown defender:webops /app/reports && \
     chmod 770 /app/reports && \
+    chown root:webops /app/reports/.bundle-queue /app/reports/.db-audit-queue \
+    /app/reports/.maintenance-queue /app/reports/.template-queue /app/reports/.webhook-queue && \
+    chmod 770 /app/reports/.bundle-queue /app/reports/.db-audit-queue \
+    /app/reports/.maintenance-queue /app/reports/.template-queue /app/reports/.webhook-queue && \
     chown root:maintops /var/log/supervisor && \
     chmod 775 /var/log/supervisor && \
     chown root:root /opt/.credentials && \
     chmod 700 /opt/.credentials && \
+    chown root:webops /var/lib/megacorp /var/lib/megacorp/.job_tokens && \
+    chmod 750 /var/lib/megacorp && \
+    chmod 770 /var/lib/megacorp/.job_tokens && \
     chown -R defender:maintops /home/defender && \
     chmod 700 /home/defender /home/defender/.ssh && \
     chown root:root /etc/crontabs && \

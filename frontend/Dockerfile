@@ -6,8 +6,11 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# Install dependencies from the lockfile for reproducible image builds.
+RUN npm config set fetch-retries 5 && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm ci --no-audit --no-fund
 
 # Copy source code
 COPY . .
@@ -19,7 +22,7 @@ ENV VITE_API_BASE=""
 RUN npm run build
 
 # Serve stage
-FROM nginx:alpine
+FROM nginx:1.27-alpine
 
 RUN apk add --no-cache tzdata
 
@@ -30,6 +33,7 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 
 # Copy custom nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY security-headers.conf /etc/nginx/snippets/security-headers.conf
 
 # Expose port 80
 EXPOSE 80

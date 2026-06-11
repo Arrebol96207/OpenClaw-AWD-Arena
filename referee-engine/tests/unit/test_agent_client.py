@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import sys
 import json
+import shlex
 
 import pytest
 
@@ -10,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent_client import AgentClient, AgentSession, PromptRenderer  # noqa: E402
+from agent_client import AgentClient, AgentSession, InitResult, PromptRenderer  # noqa: E402
 from backends.hermes_backend import HermesAgentClient  # noqa: E402
 
 
@@ -49,6 +50,9 @@ def test_render_attack_start_includes_player_status_polling_guidance():
         player_id=1,
         enemy_targets=[{"player_id": 2, "ip": "10.200.0.2", "port": 3000}],
         target_port=3000,
+        own_target_ip="10.0.0.1",
+        maintenance_auth_mode="ssh_key",
+        maintenance_helper_command="target-ssh",
         referee_api_url="http://host.docker.internal:8000",
         player_status_url="http://host.docker.internal:8000/api/player/status",
         player_read_token="token-123",
@@ -59,6 +63,12 @@ def test_render_attack_start_includes_player_status_polling_guidance():
 
     assert "X-Player-Token: token-123" in rendered
     assert "http://host.docker.internal:8000/api/player/status" in rendered
+    assert "target-ssh '<remote command>'" in rendered
+    assert "target-ssh 'cat /app/app.py'" in rendered
+    assert "X-Player-Token: token-123" in rendered
+    assert '"target_player_id": 2' in rendered
+    assert '"player_id": 1' not in rendered
+    assert '"target_player_id": <target_player_id>' not in rendered
     assert "30-60 秒没有明显进展" in rendered
     assert "自上次查询以来，你自己以及所有选手的分数变化" in rendered
     assert "当前排名、与领先者分差、与前后名的分差" in rendered
@@ -208,6 +218,322 @@ async def test_send_message_marks_session_ready_when_session_id_is_returned(monk
     assert session.session_ready is True
     assert session.runtime_ready is True
     assert session.interactive_ready is False
+
+
+@pytest.mark.asyncio
+async def test_configure_container_restarts_gateway_before_waiting_for_live_model(monkeypatch):
+    client = AgentClient(llm_api_key="test-key", llm_base_url="https://example.test/v1", llm_model="model-a")
+    calls = []
+
+    async def fake_exec(container_name, command, timeout=60, stream_callback=None, session=None, message_kind=None, message_mode=None):
+        calls.append(command)
+        if command.startswith("cat "):
+            return json.dumps({
+                "gateway": {"auth": {"token": "tok"}},
+                "agents": {"defaults": {"model": "routerss/model-a"}},
+                "models": {"providers": {"routerss": {"api": "openai-completions"}}},
+            })
+        if command.startswith("test -f"):
+            return "ok"
+        return ""
+
+    async def fake_exec_as_root(container_name, command, timeout=30):
+        calls.append(command)
+        return ""
+
+    async def fake_bootstrap(container_name):
+        return InitResult(True)
+
+    async def fake_config_wait(container_name):
+        return InitResult(True)
+
+    async def fake_restart(container_name):
+        calls.append("restart")
+        return InitResult(True)
+
+    async def fake_wait_model(container_name, timeout=None):
+        calls.append("wait_model")
+        return client.qualified_model, "agent model: routerss/model-a"
+
+    class FakeCopyProcess:
+        returncode = 0
+
+        async def communicate(self, input=None):
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        calls.append(args[0])
+        return FakeCopyProcess()
+
+    monkeypatch.setattr(client, "_exec", fake_exec)
+    monkeypatch.setattr(client, "_exec_as_root", fake_exec_as_root)
+    monkeypatch.setattr(client, "_wait_for_gateway_bootstrap", fake_bootstrap)
+    monkeypatch.setattr(client, "_wait_for_gateway_config", fake_config_wait)
+    monkeypatch.setattr(client, "_restart_gateway_container", fake_restart)
+    monkeypatch.setattr(client, "_wait_gateway_model_applied", fake_wait_model)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await client.configure_container("claw-test")
+
+    assert result.success is True
+    assert calls.index("restart") < calls.index("wait_model")
+
+
+@pytest.mark.asyncio
+async def test_configure_container_accepts_gateway_model_runtime_suffix(monkeypatch):
+    client = AgentClient(llm_api_key="test-key", llm_base_url="https://example.test/v1", llm_model="gpt-5.5")
+
+    async def fake_exec(container_name, command, timeout=60, stream_callback=None, session=None, message_kind=None, message_mode=None):
+        if command.startswith("cat "):
+            return json.dumps({
+                "gateway": {"auth": {"token": "tok"}},
+                "agents": {"defaults": {"model": "routerss/gpt-5.5"}},
+                "models": {"providers": {"routerss": {"api": "openai-completions"}}},
+            })
+        if command.startswith("test -f"):
+            return "ok"
+        return ""
+
+    async def fake_exec_as_root(container_name, command, timeout=30):
+        return ""
+
+    async def fake_bootstrap(container_name):
+        return InitResult(True)
+
+    async def fake_config_wait(container_name):
+        return InitResult(True)
+
+    async def fake_restart(container_name):
+        return InitResult(True)
+
+    async def fake_wait_model(container_name, timeout=None):
+        return "routerss/gpt-5.5 (thinking=medium, fast=off)", "agent model: routerss/gpt-5.5 (thinking=medium, fast=off)"
+
+    class FakeCopyProcess:
+        returncode = 0
+
+        async def communicate(self, input=None):
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeCopyProcess()
+
+    monkeypatch.setattr(client, "_exec", fake_exec)
+    monkeypatch.setattr(client, "_exec_as_root", fake_exec_as_root)
+    monkeypatch.setattr(client, "_wait_for_gateway_bootstrap", fake_bootstrap)
+    monkeypatch.setattr(client, "_wait_for_gateway_config", fake_config_wait)
+    monkeypatch.setattr(client, "_restart_gateway_container", fake_restart)
+    monkeypatch.setattr(client, "_wait_gateway_model_applied", fake_wait_model)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await client.configure_container("claw-test")
+
+    assert result.success is True
+
+
+def test_normalize_gateway_model_value_strips_runtime_suffix():
+    assert (
+        AgentClient._normalize_gateway_model_value("routerss/gpt-5.5 (thinking=medium, fast=off)")
+        == "routerss/gpt-5.5"
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_config_streams_json_to_container_without_docker_cp(monkeypatch):
+    client = AgentClient(llm_api_key="test-key", llm_model="model-a")
+    observed = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self, input=None):
+            observed["stdin"] = input
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        observed["args"] = args
+        observed["stdin_pipe"] = kwargs.get("stdin")
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    await client._write_config_to_container(
+        "claw-test",
+        {"models": {"providers": {"routerss": {"apiKey": "secret-key", "models": [{"id": "model-a"}]}}}},
+    )
+
+    assert observed["args"][:6] == ("docker", "exec", "-u", "root", "-i", "claw-test")
+    assert "cp" not in observed["args"]
+    assert observed["stdin_pipe"] == asyncio.subprocess.PIPE
+    payload = json.loads(observed["stdin"].decode("utf-8"))
+    assert payload["models"]["providers"]["routerss"]["apiKey"] == "secret-key"
+
+
+def test_build_agent_exec_command_quotes_base64_payload():
+    client = AgentClient(llm_api_key="test-key")
+    session = AgentSession(
+        player_id=1,
+        container_name="claw-test",
+        target_container="target-test",
+        target_ip="10.0.0.1",
+    )
+
+    payload = "abc'; touch /tmp/pwned #"
+    command = client.build_agent_exec_command(session, payload, 30)
+
+    assert shlex.quote(payload) in command
+    assert "printf %s" in command
+
+
+@pytest.mark.asyncio
+async def test_session_file_paths_are_shell_quoted(monkeypatch):
+    client = AgentClient(llm_api_key="test-key")
+    session = AgentSession(
+        player_id=1,
+        container_name="claw-test",
+        target_container="target-test",
+        target_ip="10.0.0.1",
+        session_id="sid'; touch /tmp/pwned #",
+    )
+    commands = []
+
+    async def fake_exec(container_name, command, timeout=60, stream_callback=None, session=None, message_kind=None, message_mode=None):
+        commands.append(command)
+        return ""
+
+    monkeypatch.setattr(client, "_exec", fake_exec)
+
+    await client._resolve_session_file(session)
+
+    assert commands
+    expected_path = f"{client.OPENCLAW_SESSION_DIR}/{session.session_id}.jsonl"
+    assert shlex.quote(expected_path) in commands[0]
+
+
+@pytest.mark.asyncio
+async def test_exec_uses_large_stream_limit_for_long_stdout_lines(monkeypatch):
+    client = AgentClient(llm_api_key="test-key")
+    observed = {}
+
+    class FakeReader:
+        def __init__(self, chunks):
+            self.chunks = list(chunks)
+
+        async def readline(self):
+            if self.chunks:
+                return self.chunks.pop(0)
+            return b""
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = FakeReader([(b"x" * 70000) + b"\n"])
+            self.stderr = FakeReader([])
+
+        async def wait(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        observed["limit"] = kwargs.get("limit")
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    output = await client._exec("claw-test", "printf long-line")
+
+    assert output == "x" * 70000
+    assert observed["limit"] == client.SUBPROCESS_STREAM_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_exec_invokes_docker_without_host_shell(monkeypatch):
+    client = AgentClient(llm_api_key="test-key")
+    observed = {}
+
+    class FakeReader:
+        async def readline(self):
+            return b""
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = FakeReader()
+            self.stderr = FakeReader()
+
+        async def wait(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        observed["args"] = args
+        observed["limit"] = kwargs.get("limit")
+        return FakeProcess()
+
+    async def forbidden_shell(*args, **kwargs):
+        raise AssertionError("host shell must not be used")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden_shell)
+
+    container_name = "claw-test; touch /tmp/host-pwned"
+    command = "printf ok; touch /tmp/container-only"
+    await client._exec(container_name, command)
+
+    assert observed["args"] == (
+        "docker",
+        "exec",
+        container_name,
+        "sh",
+        "-lc",
+        command,
+    )
+    assert observed["limit"] == client.SUBPROCESS_STREAM_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_exec_as_root_invokes_docker_without_host_shell(monkeypatch):
+    client = AgentClient(llm_api_key="test-key")
+    observed = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        observed["args"] = args
+        observed["limit"] = kwargs.get("limit")
+        return FakeProcess()
+
+    async def forbidden_shell(*args, **kwargs):
+        raise AssertionError("host shell must not be used")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden_shell)
+
+    container_name = "claw-test; touch /tmp/host-pwned"
+    command = "chown node:node /home/node/.openclaw/openclaw.json"
+    await client._exec_as_root(container_name, command)
+
+    assert observed["args"] == (
+        "docker",
+        "exec",
+        "-u",
+        "root",
+        container_name,
+        "sh",
+        "-lc",
+        command,
+    )
+    assert observed["limit"] == client.SUBPROCESS_STREAM_LIMIT
 
 
 @pytest.mark.asyncio

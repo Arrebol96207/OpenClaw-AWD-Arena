@@ -2,7 +2,7 @@
 容器编排器 — Docker 容器生命周期管理
 
 基于真实测试验证的 OpenClaw 容器配置：
-- Agent: alpine/openclaw:latest
+- Agent: openclaw/local-agent:ssh
 - Target: openclaw/ctf-target:v1
 - 关键发现: 必须通过 openclaw.json 配置自定义 provider
   并使用 "api": "openai-completions"，否则请求会失败
@@ -18,6 +18,7 @@ import secrets
 import hashlib
 import asyncio
 import base64
+import shlex
 from typing import Dict, List, Optional, Any, Tuple, cast
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -37,6 +38,23 @@ def _require_container_id(container_id: Optional[str], container_name: str) -> s
 logger = logging.getLogger(__name__)
 
 CONTAINER_TIMEZONE = "Asia/Shanghai"
+
+
+def _normalize_provider_api(value: Optional[str]) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return "openai-completions"
+    normalized = raw.lower().replace("_", "-").replace(" ", "-")
+    aliases = {
+        "openai": "openai-completions",
+        "custom": "openai-completions",
+        "openai-compatible": "openai-completions",
+        "openai-completion": "openai-completions",
+        "openai-completions": "openai-completions",
+        "anthropic": "anthropic",
+        "claude": "anthropic",
+    }
+    return aliases.get(normalized, raw)
 
 
 @dataclass
@@ -69,7 +87,7 @@ class RoundOrchestrator:
     """
     
     # 已验证的镜像
-    DEFAULT_AGENT_IMAGE = "alpine/openclaw:latest"
+    DEFAULT_AGENT_IMAGE = "openclaw/local-agent:ssh"
     DEFAULT_TARGET_IMAGE = "openclaw/ctf-target:v1"
     
     # OpenClaw 配置路径
@@ -81,6 +99,37 @@ class RoundOrchestrator:
         self.client = docker.from_env()
         self.topology = ArenaTopology(match_id=match_id, network_name=f"awd_{match_id}")
         self.logger = logging.getLogger(f"Orchestrator-{match_id}")
+
+    async def _write_openclaw_config_to_container(self, container_name: str, config: dict) -> bool:
+        """Write openclaw.json through stdin so LLM keys are not staged on the host filesystem."""
+        config_json = json.dumps(config, indent=2)
+        quoted_path = shlex.quote(self.OPENCLAW_CONFIG_PATH)
+        quoted_dir = shlex.quote(os.path.dirname(self.OPENCLAW_CONFIG_PATH))
+        command = (
+            f"umask 077 && mkdir -p {quoted_dir} && "
+            f"cat > {quoted_path} && chown node:node {quoted_path}"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            "exec",
+            "-u",
+            "root",
+            "-i",
+            container_name,
+            "sh",
+            "-lc",
+            command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await asyncio.wait_for(proc.communicate(config_json.encode("utf-8")), timeout=10)
+        if proc.returncode != 0:
+            self.logger.error(
+                f"[{container_name}] Config write failed: {stderr.decode(errors='replace')}"
+            )
+            return False
+        return True
     
     # ==================== 异步接口 (推荐) ====================
     
@@ -161,6 +210,7 @@ class RoundOrchestrator:
         llm_api_key: str,
         llm_base_url: str = "",
         llm_model: str = "claude-sonnet-4-6",
+        llm_provider_api: str = "openai-completions",
     ) -> bool:
         """
         异步配置 OpenClaw Agent 的模型 provider
@@ -171,8 +221,13 @@ class RoundOrchestrator:
         """
         # 等待 Gateway 创建配置文件
         for _ in range(15):
-            proc = await asyncio.create_subprocess_shell(
-                f"docker exec {container_name} test -f {self.OPENCLAW_CONFIG_PATH} && echo ok",
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                container_name,
+                "sh",
+                "-lc",
+                f"test -f {self.OPENCLAW_CONFIG_PATH} && echo ok",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -185,8 +240,12 @@ class RoundOrchestrator:
             return False
         
         # 读取现有配置
-        proc = await asyncio.create_subprocess_shell(
-            f"docker exec {container_name} cat {self.OPENCLAW_CONFIG_PATH}",
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            "exec",
+            container_name,
+            "cat",
+            self.OPENCLAW_CONFIG_PATH,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -208,7 +267,7 @@ class RoundOrchestrator:
                 "providers": {
                     "routerss": {
                         "apiKey": llm_api_key,
-                        "api": "openai-completions",
+                        "api": _normalize_provider_api(llm_provider_api),
                         "models": [{"id": llm_model, "name": llm_model}],
                     }
                 }
@@ -221,34 +280,25 @@ class RoundOrchestrator:
         if gateway_token:
             new_config.setdefault("gateway", {}).setdefault("auth", {})["token"] = gateway_token
         
-        import tempfile
-        config_json = json.dumps(new_config, indent=2)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            f.write(config_json)
-            tmp_path = f.name
-        
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                f"docker cp {tmp_path} {container_name}:{self.OPENCLAW_CONFIG_PATH}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await asyncio.wait_for(proc.communicate(), timeout=10)
-        finally:
-            os.unlink(tmp_path)
+        if not await self._write_openclaw_config_to_container(container_name, new_config):
+            return False
         
         await asyncio.sleep(5)
         
         # 验证
-        proc = await asyncio.create_subprocess_shell(
-            f"docker exec {container_name} cat {self.OPENCLAW_CONFIG_PATH}",
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            "exec",
+            container_name,
+            "cat",
+            self.OPENCLAW_CONFIG_PATH,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await proc.communicate()
         verify = stdout.decode()
         
-        if llm_model in verify and "openai-completions" in verify:
+        if llm_model in verify and _normalize_provider_api(llm_provider_api) in verify:
             self.logger.info(f"[{container_name}] Configured: model={llm_model}")
             return True
         
@@ -297,15 +347,32 @@ class RoundOrchestrator:
     # ==================== 内部方法 ====================
     
     def _create_network(self):
-        """创建 Docker 网络"""
+        """创建 Docker 网络 — 使用安全的子网选择避免碰撞"""
         try:
+            existing_subnets = self._get_existing_subnets()
+            # Try candidate subnets in order; skip any that overlap with existing Docker networks.
             match_hash = int(hashlib.md5(self.match_id.encode()).hexdigest()[:4], 16) % 256
-            subnet = f"10.201.{match_hash}.0/24"
-            gateway = f"10.201.{match_hash}.1"
-            
+            import ipaddress
+            candidates = [
+                f"10.201.{match_hash}.0/24",
+                *[f"10.201.{i}.0/24" for i in range(match_hash + 1, 256)],
+                *[f"10.201.{i}.0/24" for i in range(0, match_hash)],
+            ]
+            subnet = None
+            gateway = None
+            for candidate in candidates:
+                network = ipaddress.ip_network(candidate, strict=False)
+                if any(network.overlaps(existing) for existing in existing_subnets):
+                    continue
+                subnet = candidate
+                gateway = str(next(network.hosts()))
+                break
+            if subnet is None:
+                raise RuntimeError("No available Docker subnet found")
+
             ipam_pool = IPAMPool(subnet=subnet, gateway=gateway)
             ipam_config = IPAMConfig(pool_configs=[ipam_pool])
-            
+
             network = self.client.networks.create(
                 self.topology.network_name,
                 driver="bridge",
@@ -318,6 +385,25 @@ class RoundOrchestrator:
             if "already exists" in str(e):
                 return self.client.networks.get(self.topology.network_name)
             raise
+
+    def _get_existing_subnets(self):
+        """获取所有已存在的 Docker 网络子网"""
+        import ipaddress
+        subnets = []
+        list_networks = getattr(self.client.networks, "list", None)
+        if not callable(list_networks):
+            return subnets
+        for network in list_networks():
+            ipam = network.attrs.get("IPAM", {})
+            for config in ipam.get("Config") or []:
+                subnet = config.get("Subnet")
+                if not subnet:
+                    continue
+                try:
+                    subnets.append(ipaddress.ip_network(subnet, strict=False))
+                except ValueError:
+                    pass
+        return subnets
     
     def _create_target_container(self, player_id: int, network) -> ContainerInfo:
         """创建靶机容器"""
@@ -327,7 +413,7 @@ class RoundOrchestrator:
         # 为每个漏洞点生成独立 flag
         flags = {
             f"FLAG_{i}": f"FLAG{{{secrets.token_hex(16)}}}"
-            for i in range(1, 6)
+            for i in range(1, 7)
         }
         flags["TZ"] = CONTAINER_TIMEZONE
         flags["MAINTENANCE_USERNAME"] = "defender"
@@ -341,6 +427,7 @@ class RoundOrchestrator:
             environment=flags,
             detach=True,
             mem_limit="1g",
+            pids_limit=512,
             restart_policy=CONTAINER_RESTART_POLICY,
             labels={
                 "awd.match_id": self.match_id,
@@ -370,9 +457,20 @@ class RoundOrchestrator:
     ) -> ContainerInfo:
         """创建 Agent 容器"""
         name = f"claw_{self.match_id}_{player_id}"
+        llm_api_key = player_config.get("apiKey") or llm_config.get("apiKey", "")
+        llm_base_url = player_config.get("baseUrl") or llm_config.get("baseUrl", "")
+        llm_model = player_config.get("model") or llm_config.get("model", "")
+        llm_provider_api = _normalize_provider_api(
+            player_config.get("api")
+            or player_config.get("provider")
+            or llm_config.get("provider", "openai-completions")
+        )
         
         env = {
-            "OPENAI_API_KEY": player_config.get("apiKey") or llm_config.get("apiKey", ""),
+            "OPENAI_API_KEY": llm_api_key,
+            "OPENAI_BASE_URL": llm_base_url,
+            "OPENAI_MODEL": llm_model,
+            "OPENCLAW_PROVIDER_API": llm_provider_api,
             "HTTPS_PROXY": proxy_url,
             "HTTP_PROXY": proxy_url,
             "NO_PROXY": "localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8,host.docker.internal,.local",
@@ -387,6 +485,9 @@ class RoundOrchestrator:
             environment=env,
             detach=True,
             mem_limit="2g",
+            pids_limit=512,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true"],
             restart_policy=CONTAINER_RESTART_POLICY,
             labels={
                 "awd.match_id": self.match_id,
@@ -435,8 +536,8 @@ class RoundOrchestrator:
             while time.time() - start < timeout:
                 try:
                     result = subprocess.run(
-                        f"docker exec {target.name} curl -sf http://localhost:3000/health",
-                        shell=True, capture_output=True, timeout=5,
+                        ["docker", "exec", target.name, "curl", "-sf", "http://localhost:3000/health"],
+                        capture_output=True, timeout=5,
                     )
                     if result.returncode == 0:
                         self.logger.info(f"Target {target.name} ready")
@@ -455,8 +556,13 @@ class RoundOrchestrator:
         for target in targets:
             for _ in range(timeout // 2):
                 try:
-                    proc = await asyncio.create_subprocess_shell(
-                        f"docker exec {target.name} curl -sf http://localhost:3000/health",
+                    proc = await asyncio.create_subprocess_exec(
+                        "docker",
+                        "exec",
+                        target.name,
+                        "curl",
+                        "-sf",
+                        "http://localhost:3000/health",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
@@ -491,8 +597,10 @@ class RoundOrchestrator:
         
         for name, info in self.topology.containers.items():
             try:
-                proc = await asyncio.create_subprocess_shell(
-                    f"docker logs {name} 2>&1",
+                proc = await asyncio.create_subprocess_exec(
+                    "docker",
+                    "logs",
+                    name,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )

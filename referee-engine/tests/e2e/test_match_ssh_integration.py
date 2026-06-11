@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 
 PHASE8_TARGET_TEST_IMAGE = "openclaw/ctf-target:phase8-live-tests"
+PHASE8_AGENT_TEST_IMAGE = "openclaw/local-agent:ssh"
 _PHASE8_TARGET_IMAGE_READY = False
 
 
@@ -30,9 +31,17 @@ def _load_main_module(module_name: str):
 
 
 def _require_live_phase8_docker() -> None:
+    try:
+        import docker
+    except Exception as exc:
+        pytest.skip(f"docker SDK is unavailable for live Phase 8 integration tests: {exc}")
+
+    if getattr(docker, "__openclaw_test_stub__", False) or not callable(getattr(docker, "from_env", None)):
+        pytest.skip("docker SDK is incomplete for live Phase 8 integration tests")
+
     commands = [
         ["docker", "info"],
-        ["docker", "image", "inspect", "alpine/openclaw:latest"],
+        ["docker", "image", "inspect", PHASE8_AGENT_TEST_IMAGE],
     ]
     for command in commands:
         try:
@@ -89,7 +98,7 @@ def _build_live_config(module):
         ),
         players=[module.PlayerConfig(id=1, name="P1")],
         target_image=PHASE8_TARGET_TEST_IMAGE,
-        agent_image="alpine/openclaw:latest",
+        agent_image=PHASE8_AGENT_TEST_IMAGE,
     )
 
 
@@ -146,12 +155,11 @@ async def _write_agent_private_key(engine, player, ssh_key_material, private_key
                 f"mkdir -p {ssh_dir} && "
                 f"chmod 700 {ssh_dir} && "
                 f"cat > {ssh_key_material.private_key_path} && "
-                f"chmod 600 {ssh_key_material.private_key_path} && "
-                f"chown -R node:node {ssh_dir}"
+                f"chmod 600 {ssh_key_material.private_key_path}"
             ),
         ],
         timeout=20,
-        user="root",
+        user=ssh_key_material.owner_user or "node",
         stdin_text=private_key,
     )
 

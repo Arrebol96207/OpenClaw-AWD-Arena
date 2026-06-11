@@ -50,13 +50,14 @@ def _phase8_config_payload():
         "flags": {"refreshInterval": 300, "format": "flag{{{hash}}}"},
         "network": {"arenaSubnet": "172.20.0.0/16", "mgmtSubnetPrefix": "172.21"},
         "target_image": "openclaw/ctf-target:v1",
-        "agent_image": "alpine/openclaw:latest",
+        "agent_image": "openclaw/local-agent:ssh",
     }
 
 
 @pytest.mark.asyncio
 async def test_start_match_http_runs_phase8_ssh_key_startup_flow(monkeypatch):
     monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    monkeypatch.setenv("REFEREE_API_KEY", "test-api-key")
     module = _load_main_module("test_main_phase8_http_start_match")
 
     async def fake_setup_containers(match):
@@ -118,7 +119,7 @@ async def test_start_match_http_runs_phase8_ssh_key_startup_flow(monkeypatch):
     transport = httpx.ASGITransport(app=module.app)
     async with module.app.router.lifespan_context(module.app):
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post("/api/matches/start", json=config_payload)
+            response = await client.post("/api/matches/start", json=config_payload, headers={"X-API-Key": "test-api-key"})
 
             assert response.status_code == 200
             payload = response.json()
@@ -152,6 +153,7 @@ async def test_start_match_http_runs_phase8_ssh_key_startup_flow(monkeypatch):
 @pytest.mark.asyncio
 async def test_start_match_http_waits_for_all_players_ready_before_entering_defense(monkeypatch):
     monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    monkeypatch.setenv("REFEREE_API_KEY", "test-api-key")
     module = _load_main_module("test_main_phase8_http_waits_all_ready_start_match")
 
     async def fake_setup_containers(match):
@@ -223,7 +225,7 @@ async def test_start_match_http_waits_for_all_players_ready_before_entering_defe
     transport = httpx.ASGITransport(app=module.app)
     async with module.app.router.lifespan_context(module.app):
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post("/api/matches/start", json=_phase8_config_payload())
+            response = await client.post("/api/matches/start", json=_phase8_config_payload(), headers={"X-API-Key": "test-api-key"})
 
             assert response.status_code == 200
             match_id = response.json()["match_id"]
@@ -250,6 +252,7 @@ async def test_start_match_http_waits_for_all_players_ready_before_entering_defe
 @pytest.mark.asyncio
 async def test_start_match_http_records_match_error_when_phase8_container_setup_fails(monkeypatch):
     monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    monkeypatch.setenv("REFEREE_API_KEY", "test-api-key")
     module = _load_main_module("test_main_phase8_http_match_error")
 
     async def fake_setup_containers(_match):
@@ -267,7 +270,7 @@ async def test_start_match_http_records_match_error_when_phase8_container_setup_
     transport = httpx.ASGITransport(app=module.app)
     async with module.app.router.lifespan_context(module.app):
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post("/api/matches/start", json=_phase8_config_payload())
+            response = await client.post("/api/matches/start", json=_phase8_config_payload(), headers={"X-API-Key": "test-api-key"})
 
             assert response.status_code == 200
             match_id = response.json()["match_id"]
@@ -287,7 +290,7 @@ async def test_start_match_http_records_match_error_when_phase8_container_setup_
             assert match_error_events
             assert match_error_events[-1]["data"] == {"error": "phase8 setup failed"}
 
-            detail_response = await client.get(f"/api/matches/{match_id}")
+            detail_response = await client.get(f"/api/matches/{match_id}", headers={"X-API-Key": "test-api-key"})
             assert detail_response.status_code == 200
             detail_payload = detail_response.json()
             assert detail_payload["status"] == "error"

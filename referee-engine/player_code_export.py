@@ -31,6 +31,7 @@ REPLAY_SCHEMA_VERSION = 2
 RESULT_STATUS_COMPLETE = "complete"
 RESULT_STATUS_PARTIAL = "partial"
 RESULT_STATUS_FAILED = "failed"
+EXPORT_MATCH_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 LEGACY_FILTER_REASON_DIRECTORY_PATH = "directory_path"
 LEGACY_FILTER_REASON_EXCLUDED_PREFIX = "excluded_prefix"
@@ -136,6 +137,12 @@ HARD_EXCLUDED_PREFIXES = (
 DEFAULT_EXCLUDED_PREFIXES = (
     "/run",
     "/var/log",
+    "/app/reports/.bundle-queue",
+    "/app/reports/.db-audit-queue",
+    "/app/reports/.maintenance-queue",
+    "/app/reports/.template-queue",
+    "/app/reports/.webhook-queue",
+    "/var/lib/megacorp/.job_tokens",
 )
 HIGH_VALUE_PREFIXES = (
     "/tmp",
@@ -251,6 +258,8 @@ SCRIPT_CONTENT_PATTERN = re.compile(
 CONFIG_CONTENT_PATTERN = re.compile(r"^\s*[A-Za-z0-9_.-]+\s*[:=]\s*\S+", re.MULTILINE)
 PATCH_CONTENT_PATTERN = re.compile(r"(^diff --git )|(^--- )|(^\+\+\+ )|(^@@ )", re.MULTILINE)
 BEARER_TOKEN_PATTERN = re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+\b", re.IGNORECASE)
+AUTH_BASIC_PATTERN = re.compile(r"\bBasic\s+[A-Za-z0-9+/=]{8,}\b", re.IGNORECASE)
+HTTP_COOKIE_HEADER_PATTERN = re.compile(r"(?im)^((?:set-cookie|cookie)\s*:\s*)([^\r\n]+)")
 COMMON_API_KEY_PATTERN = re.compile(
     r"\b(?:sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b"
 )
@@ -277,8 +286,31 @@ def get_exports_root() -> Path:
     return Path(database.DB_PATH).resolve().parent / "exports"
 
 
+def _validate_export_match_id(match_id: str) -> str:
+    normalized = str(match_id or "").strip()
+    if not EXPORT_MATCH_ID_PATTERN.match(normalized):
+        raise ValueError("Invalid match_id")
+    return normalized
+
+
 def get_player_code_export_path(match_id: str) -> Path:
+    match_id = _validate_export_match_id(match_id)
     return get_exports_root() / match_id / f"match_{match_id}_player_code_export.zip"
+
+
+def player_code_export_payload_is_partial(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return bool(payload.get("partial")) or payload.get("complete") is False
+
+
+def safe_player_code_export_dir(match_id: str, *, exports_root: Optional[Path] = None) -> Path:
+    match_id = _validate_export_match_id(match_id)
+    export_root = (exports_root or get_exports_root()).resolve()
+    export_dir = (export_root / match_id).resolve()
+    if export_dir == export_root or export_root not in export_dir.parents:
+        raise ValueError("invalid export directory")
+    return export_dir
 
 
 def get_player_code_export_profile() -> str:
@@ -368,8 +400,19 @@ def _normalized_archive_member_name(member_name: str) -> str:
 def _archive_member_matches_path(member_name: str, container_path: str) -> bool:
     normalized_name = _normalized_archive_member_name(member_name)
     normalized_suffix = _relative_container_path(container_path)
-    basename = posixpath.basename(container_path)
-    return normalized_name == normalized_suffix or normalized_name == basename
+    if normalized_name == normalized_suffix:
+        return True
+
+    # Docker may return a single-file archive whose member name is only the
+    # basename (for example ".ash_history" for "/root/.ash_history"). Keep that
+    # compatibility, but never let paths such as "../../app.py" or "dir/app.py"
+    # satisfy a request for "/app/app.py".
+    basename = posixpath.basename(normalized_suffix)
+    return (
+        normalized_name == basename
+        and normalized_name not in {"", ".", ".."}
+        and "/" not in normalized_name
+    )
 
 
 def _archive_member_is_descendant(member_name: str, container_path: str) -> bool:
@@ -495,6 +538,16 @@ def _redact_sensitive_text(text: str) -> Tuple[str, int]:
         redaction_count += 1
         return "Bearer [REDACTED]"
 
+    def replace_basic(_match: re.Match[str]) -> str:
+        nonlocal redaction_count
+        redaction_count += 1
+        return "Basic [REDACTED]"
+
+    def replace_cookie_header(match: re.Match[str]) -> str:
+        nonlocal redaction_count
+        redaction_count += 1
+        return f"{match.group(1)}[REDACTED]"
+
     def replace_plain_secret(_match: re.Match[str]) -> str:
         nonlocal redaction_count
         redaction_count += 1
@@ -521,6 +574,8 @@ def _redact_sensitive_text(text: str) -> Tuple[str, int]:
     redacted = PRIVATE_KEY_BLOCK_PATTERN.sub(replace_private_key, text)
     redacted = COMMON_API_KEY_PATTERN.sub(replace_common_key, redacted)
     redacted = BEARER_TOKEN_PATTERN.sub(replace_bearer, redacted)
+    redacted = AUTH_BASIC_PATTERN.sub(replace_basic, redacted)
+    redacted = HTTP_COOKIE_HEADER_PATTERN.sub(replace_cookie_header, redacted)
     redacted = PLATFORM_TARGET_PASSWORD_PATTERN.sub(replace_plain_secret, redacted)
     redacted = SSHPASS_PASSWORD_PATTERN.sub(replace_secret_value, redacted)
     redacted = PASSWORD_PROMPT_PATTERN.sub(replace_secret_value, redacted)

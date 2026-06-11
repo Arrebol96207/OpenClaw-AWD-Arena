@@ -1,4 +1,5 @@
 import React from 'react'
+import { Button, cx } from './ui'
 
 export type StreamViewMode = 'cleaned' | 'raw'
 
@@ -156,11 +157,7 @@ const tryParseJsonChunk = (lines: string[]): ParsedJsonChunk | null => {
       const payloadType = typeof row.type === 'string' ? row.type : ''
 
       if (payloadType === 'assistant') {
-        const text = typeof row.text === 'string'
-          ? row.text
-          : typeof row.content === 'string'
-            ? row.content
-            : ''
+        const text = typeof row.text === 'string' ? row.text : typeof row.content === 'string' ? row.content : ''
         if (text.trim()) chunk.assistantText.push(normalizeFreeText(text))
         continue
       }
@@ -188,11 +185,7 @@ const tryParseJsonChunk = (lines: string[]): ParsedJsonChunk | null => {
       }
 
       if (payloadType === 'message') {
-        const text = typeof row.text === 'string'
-          ? row.text
-          : typeof row.message === 'string'
-            ? row.message
-            : ''
+        const text = typeof row.text === 'string' ? row.text : typeof row.message === 'string' ? row.message : ''
         if (text.trim()) chunk.notes.push(normalizeFreeText(text))
         continue
       }
@@ -208,9 +201,7 @@ const tryParseJsonChunk = (lines: string[]): ParsedJsonChunk | null => {
         typeof row.message === 'string' ? row.message :
         typeof row.content === 'string' ? row.content :
         ''
-      if (fallbackText.trim()) {
-        chunk.notes.push(normalizeFreeText(fallbackText))
-      }
+      if (fallbackText.trim()) chunk.notes.push(normalizeFreeText(fallbackText))
     }
 
     return chunk
@@ -256,39 +247,27 @@ const classifyTextLine = (line: string): AgentBubble['type'] => {
 
   const trimmed = normalizeFreeText(stripJsonPrefix(line))
   const lowered = trimmed.toLowerCase()
-  if (thoughtPrefixes.some((prefix) => lowered.startsWith(prefix) || lowered.includes(prefix.trim()))) {
-    return 'thought'
-  }
-
-  if (actionPrefixes.some((prefix) => lowered.startsWith(prefix))) {
-    return 'action'
-  }
-
+  if (thoughtPrefixes.some((prefix) => lowered.startsWith(prefix) || lowered.includes(prefix.trim()))) return 'thought'
+  if (actionPrefixes.some((prefix) => lowered.startsWith(prefix))) return 'action'
   if (trimmed.includes('=>') || trimmed.includes('->')) return 'action'
 
   return 'action'
 }
 
-const splitStructuredText = (text: string): string[] => {
-  return text
+const splitStructuredText = (text: string): string[] =>
+  text
     .split(/\n{2,}|(?<=\.)\s+(?=[A-Z])|(?<=。)\s*/)
     .map((part) => part.trim())
     .filter(Boolean)
-}
 
 const segmentFreeText = (lines: string[]): SegmentedLine[] => {
   const segmented: SegmentedLine[] = []
 
   for (const line of lines) {
     const normalized = normalizeFreeText(stripJsonPrefix(line))
-    if (!normalized) continue
-    if (isNoiseLine(normalized)) continue
-
+    if (!normalized || isNoiseLine(normalized)) continue
     for (const part of splitStructuredText(normalized)) {
-      segmented.push({
-        kind: classifyTextLine(part),
-        text: part,
-      })
+      segmented.push({ kind: classifyTextLine(part), text: part })
     }
   }
 
@@ -301,7 +280,7 @@ const buildRawText = (lines: string[]): AgentBubble[] => {
   return [{
     id: 'raw-full',
     type: 'raw',
-    title: 'Raw output',
+    title: '原始输出',
     body: text,
     tone: 'neutral',
     meta: `${lines.length} lines`,
@@ -330,7 +309,7 @@ const bubbleFromJsonChunk = (chunk: ParsedJsonChunk, index: number): AgentBubble
       type: 'tool_call',
       title: '操作',
       body: summarizeText(toolCall, 500),
-      tone: 'neutral',
+      tone: 'warning',
     })
   })
 
@@ -368,7 +347,7 @@ const bubbleFromJsonChunk = (chunk: ParsedJsonChunk, index: number): AgentBubble
     bubbles.push({
       id: `json-raw-${index}`,
       type: 'raw',
-      title: 'Raw output',
+      title: '原始输出',
       body: JSON.stringify(chunk, null, 2),
       tone: 'neutral',
     })
@@ -378,19 +357,13 @@ const bubbleFromJsonChunk = (chunk: ParsedJsonChunk, index: number): AgentBubble
 }
 
 export const buildAgentBubbles = (lines: string[], mode: StreamViewMode): AgentBubble[] => {
-  if (mode === 'raw') {
-    return buildRawText(lines)
-  }
+  if (mode === 'raw') return buildRawText(lines)
 
   const cleanedLines = lines.map(sanitizeLine).filter((line) => !isNoiseLine(line))
-  if (cleanedLines.length === 0) {
-    return buildRawText(lines)
-  }
+  if (cleanedLines.length === 0) return buildRawText(lines)
 
   const jsonChunk = tryParseJsonChunk(cleanedLines)
-  if (jsonChunk) {
-    return bubbleFromJsonChunk(jsonChunk, 0)
-  }
+  if (jsonChunk) return bubbleFromJsonChunk(jsonChunk, 0)
 
   const segmentedLines = segmentFreeText(cleanedLines)
   const sourceLines = segmentedLines.length > 0
@@ -401,7 +374,6 @@ export const buildAgentBubbles = (lines: string[], mode: StreamViewMode): AgentB
   let currentType: AgentBubble['type'] | null = null
   let currentTitle = ''
   let currentTone: AgentBubble['tone'] = 'neutral'
-  let currentMeta: string | undefined
   let buffer: string[] = []
 
   const flush = () => {
@@ -412,13 +384,11 @@ export const buildAgentBubbles = (lines: string[], mode: StreamViewMode): AgentB
       title: currentTitle,
       body: buffer.join('\n'),
       tone: currentTone,
-      meta: currentMeta,
     })
     buffer = []
     currentType = null
     currentTitle = ''
     currentTone = 'neutral'
-    currentMeta = undefined
   }
 
   const entries = segmentedLines.length > 0
@@ -438,7 +408,6 @@ export const buildAgentBubbles = (lines: string[], mode: StreamViewMode): AgentB
 
     const nextTone: AgentBubble['tone'] =
       nextType === 'thought' ? 'info' :
-      nextType === 'action' ? 'neutral' :
       nextType === 'tool_call' ? 'warning' :
       nextType === 'tool_result' ? 'success' :
       nextType === 'system' ? 'success' :
@@ -450,7 +419,6 @@ export const buildAgentBubbles = (lines: string[], mode: StreamViewMode): AgentB
       currentType = nextType
       currentTitle = nextTitle
       currentTone = nextTone
-      currentMeta = undefined
     }
 
     buffer.push(nextType === 'tool_call' || nextType === 'error' ? summarizeText(text, 320) : text)
@@ -462,7 +430,7 @@ export const buildAgentBubbles = (lines: string[], mode: StreamViewMode): AgentB
 }
 
 const toneClasses: Record<NonNullable<AgentBubble['tone']>, string> = {
-  neutral: 'border-slate-700 bg-slate-900/80 text-slate-200',
+  neutral: 'border-slate-700 bg-slate-950/80 text-slate-200',
   success: 'border-emerald-700/70 bg-emerald-950/40 text-emerald-100',
   warning: 'border-amber-700/70 bg-amber-950/40 text-amber-100',
   danger: 'border-rose-700/70 bg-rose-950/40 text-rose-100',
@@ -476,51 +444,44 @@ type AgentStreamViewProps = {
   emptyText: string
 }
 
-const AgentStreamView: React.FC<AgentStreamViewProps> = ({ mode, onModeChange, bubbles, emptyText }) => {
-  return (
-    <>
-      <div className="flex items-center gap-2">
-        {(['cleaned', 'raw'] as StreamViewMode[]).map((viewMode) => (
-          <button
-            key={viewMode}
-            onClick={() => onModeChange(viewMode)}
-            className={`px-3 py-1 text-xs rounded-md font-mono transition-colors ${
-              mode === viewMode
-                ? 'bg-cyan-600 text-white'
-                : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-            }`}
-          >
-            {viewMode === 'cleaned' ? 'Cleaned' : 'Raw'}
-          </button>
-        ))}
-      </div>
+const AgentStreamView: React.FC<AgentStreamViewProps> = ({ mode, onModeChange, bubbles, emptyText }) => (
+  <div className="flex min-h-0 flex-1 flex-col gap-3">
+    <div className="flex items-center gap-2">
+      {(['cleaned', 'raw'] as StreamViewMode[]).map((viewMode) => (
+        <Button
+          key={viewMode}
+          size="sm"
+          variant={mode === viewMode ? 'primary' : 'secondary'}
+          onClick={() => onModeChange(viewMode)}
+        >
+          {viewMode === 'cleaned' ? '整理' : '原始'}
+        </Button>
+      ))}
+    </div>
 
-      <div className="flex-grow overflow-auto bg-black rounded-md p-3 text-xs whitespace-pre-wrap flex flex-col gap-2">
-        {bubbles.length === 0 ? (
-          <span className="text-slate-600 select-none">{emptyText}</span>
-        ) : (
-          bubbles.map((bubble) => (
-            <div key={bubble.id} className={`rounded-lg border p-3 ${toneClasses[bubble.tone ?? 'neutral']}`}>
-              <div className="mb-1 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] uppercase tracking-wide text-slate-400">{bubble.title}</span>
-                  {bubble.meta && <span className="text-[10px] text-slate-500">{bubble.meta}</span>}
-                </div>
-                {bubble.type === 'raw' && (
-                  <span className="text-[10px] text-slate-500">verbatim</span>
-                )}
+    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto rounded-md border border-slate-800 bg-black/70 p-3 text-xs whitespace-pre-wrap">
+      {bubbles.length === 0 ? (
+        <span className="select-none text-slate-600">{emptyText}</span>
+      ) : (
+        bubbles.map((bubble) => (
+          <div key={bubble.id} className={cx('rounded-lg border p-3', toneClasses[bubble.tone ?? 'neutral'])}>
+            <div className="mb-1 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{bubble.title}</span>
+                {bubble.meta && <span className="text-[10px] text-slate-500">{bubble.meta}</span>}
               </div>
-              {bubble.type === 'raw' ? (
-                <pre className="overflow-auto whitespace-pre-wrap break-words text-slate-300">{bubble.body}</pre>
-              ) : (
-                <div className="whitespace-pre-wrap break-words">{bubble.body}</div>
-              )}
+              {bubble.type === 'raw' && <span className="text-[10px] text-slate-500">verbatim</span>}
             </div>
-          ))
-        )}
-      </div>
-    </>
-  )
-}
+            {bubble.type === 'raw' ? (
+              <pre className="overflow-auto whitespace-pre-wrap break-words text-slate-300">{bubble.body}</pre>
+            ) : (
+              <div className="whitespace-pre-wrap break-words">{bubble.body}</div>
+            )}
+          </div>
+        ))
+      )}
+    </div>
+  </div>
+)
 
 export default AgentStreamView

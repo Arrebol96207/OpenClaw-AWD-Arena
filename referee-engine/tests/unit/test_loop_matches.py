@@ -39,24 +39,32 @@ def _loop_config_payload(repeat_count: int = 3):
         "llm": {
             "provider": "openai-completions",
             "baseUrl": "https://example.test/v1",
-            "apiKey": "",
+            "apiKey": "global-secret",
             "model": "test-model",
             "proxy": "http://host.docker.internal:7897",
         },
         "players": [
-            {"id": 1, "name": "P1", "model": None, "apiKey": None, "gatewayPort": None},
+            {
+                "id": 1,
+                "name": "P1",
+                "model": None,
+                "apiKey": "player-secret",
+                "gatewayPort": None,
+                "backend_config": {"extra_env": {"CUSTOM_FLAG": "enabled", "SECRET_TOKEN": "loop-secret"}},
+            },
         ],
         "scoring": {"attackSuccess": 100, "defenseFailure": -50, "slaViolation": -50},
         "flags": {"refreshInterval": 300, "format": "flag{{{hash}}}"},
         "network": {"arenaSubnet": "172.20.0.0/16", "mgmtSubnetPrefix": "172.21"},
         "target_image": "openclaw/ctf-target:v1",
-        "agent_image": "alpine/openclaw:latest",
+        "agent_image": "openclaw/local-agent:ssh",
     }
 
 
 @pytest.mark.asyncio
 async def test_start_match_creates_loop_record_and_lists_it(monkeypatch, tmp_path):
     monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    monkeypatch.setenv("REFEREE_API_KEY", "test-api-key")
     monkeypatch.setenv("OPENCLAW_DB_PATH", str(tmp_path / "loop-start.db"))
     module = _load_main_module("test_main_loop_start")
 
@@ -104,7 +112,7 @@ async def test_start_match_creates_loop_record_and_lists_it(monkeypatch, tmp_pat
     transport = httpx.ASGITransport(app=module.app)
     async with module.app.router.lifespan_context(module.app):
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post("/api/matches/start", json=_loop_config_payload())
+            response = await client.post("/api/matches/start", json=_loop_config_payload(), headers={"X-API-Key": "test-api-key"})
             assert response.status_code == 200
             payload = response.json()
             match_id = payload["match_id"]
@@ -116,15 +124,19 @@ async def test_start_match_creates_loop_record_and_lists_it(monkeypatch, tmp_pat
             match = module.referee.matches[match_id]
             await match._startup_task
 
-            loops_response = await client.get("/api/loops")
+            loops_response = await client.get("/api/loops", headers={"X-API-Key": "test-api-key"})
             assert loops_response.status_code == 200
             loops_payload = loops_response.json()["loops"]
-            assert len(loops_payload) == 1
-            assert loops_payload[0]["loop_id"] == loop_id
-            assert loops_payload[0]["repeat_count"] == 3
-            assert loops_payload[0]["current_iteration"] == 1
-            assert loops_payload[0]["current_match_id"] == match_id
-            assert loops_payload[0]["status"] == "running"
+            loop_payload = next(item for item in loops_payload if item["loop_id"] == loop_id)
+            assert loop_payload["loop_id"] == loop_id
+            assert loop_payload["repeat_count"] == 3
+            assert loop_payload["current_iteration"] == 1
+            assert loop_payload["current_match_id"] == match_id
+            assert loop_payload["status"] == "running"
+            assert loop_payload["config"]["llm"]["apiKey"] == "********"
+            assert loop_payload["config"]["players"][0]["apiKey"] == "********"
+            assert loop_payload["config"]["players"][0]["backend_config"]["extra_env"]["SECRET_TOKEN"] == "********"
+            assert loop_payload["config"]["players"][0]["backend_config"]["extra_env"]["CUSTOM_FLAG"] == "enabled"
 
 
 @pytest.mark.asyncio
@@ -189,6 +201,7 @@ async def test_destroy_match_starts_next_loop_iteration_after_cleanup(monkeypatc
             created_at=now,
             updated_at=now,
         )
+        module.referee.loop_runtime_configs[loop_id] = config.model_dump()
 
         started_configs = []
 
@@ -204,6 +217,9 @@ async def test_destroy_match_starts_next_loop_iteration_after_cleanup(monkeypatc
         assert started_configs[0].loop.loopId == loop_id
         assert started_configs[0].loop.currentIteration == 2
         assert started_configs[0].loop.repeatCount == 2
+        assert started_configs[0].llm.apiKey == "global-secret"
+        assert started_configs[0].players[0].apiKey == "player-secret"
+        assert started_configs[0].players[0].backend_config.extra_env["SECRET_TOKEN"] == "loop-secret"
 
         loop_row = await module.database.get_loop(loop_id)
         assert loop_row is not None
@@ -211,3 +227,6 @@ async def test_destroy_match_starts_next_loop_iteration_after_cleanup(monkeypatc
         assert loop_row["current_iteration"] == 2
         assert loop_row["current_match_id"] == "match_loop_2"
         assert loop_row["last_match_id"] == match.match_id
+        assert loop_row["config"]["llm"]["apiKey"] == "********"
+        assert loop_row["config"]["players"][0]["apiKey"] == "********"
+        assert loop_row["config"]["players"][0]["backend_config"]["extra_env"]["SECRET_TOKEN"] == "********"

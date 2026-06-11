@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import subprocess
 import sys
@@ -185,6 +186,96 @@ async def test_destroy_match_clears_player_ssh_key_materials(monkeypatch):
     assert match.player_ssh_key_materials == {}
 
 
+@pytest.mark.asyncio
+async def test_destroy_match_persists_resource_cleanup_event_for_aborted_match(monkeypatch):
+    main = _load_main_module("test_main_ssh_keygen_destroy_aborted_event")
+    engine = main.RefereeEngine()
+    config = main.MatchConfig(players=[main.PlayerConfig(id=1, name="P1")])
+    match = main.MatchState("match_destroy_aborted", config)
+    match.status = "aborted"
+    match.players[1] = PlayerState(
+        player_id=1,
+        container_name="c1",
+        target_container="t1",
+        target_ip="10.0.0.1",
+        network_name="n1",
+    )
+    engine.matches[match.match_id] = match
+
+    saved_events = []
+
+    async def _fake_save_event(match_id, event_type, data, timestamp):
+        saved_events.append({
+            "match_id": match_id,
+            "event_type": event_type,
+            "data": data,
+            "timestamp": timestamp,
+        })
+
+    monkeypatch.setattr(main.database, "save_event", _fake_save_event)
+    monkeypatch.setattr(main.docker, "from_env", lambda: _FakeDockerClient())
+
+    await engine.destroy_match(match.match_id)
+
+    cleanup_event = next(event for event in saved_events if event["event_type"] == "MATCH_RESOURCES_DESTROYED")
+    assert cleanup_event["match_id"] == match.match_id
+    assert cleanup_event["data"]["status"] == "aborted"
+    assert cleanup_event["data"]["containers_removed"] == 2
+    assert cleanup_event["data"]["networks_removed"] == 2
+
+
+@pytest.mark.asyncio
+async def test_destroy_match_stops_active_match_background_tasks(monkeypatch):
+    main = _load_main_module("test_main_destroy_active_tasks")
+    engine = main.RefereeEngine()
+    config = main.MatchConfig(players=[main.PlayerConfig(id=1, name="P1")])
+    match = main.MatchState("match_destroy_active_tasks", config)
+    match.status = "attack"
+    match.players[1] = PlayerState(
+        player_id=1,
+        container_name="c1",
+        target_container="t1",
+        target_ip="10.0.0.1",
+        network_name="n1",
+    )
+    engine.matches[match.match_id] = match
+
+    async def _async_noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main.database, "save_event", _async_noop)
+    monkeypatch.setattr(main.docker, "from_env", lambda: _FakeDockerClient())
+
+    flag_cancelled = asyncio.Event()
+    timer_cancelled = asyncio.Event()
+
+    async def _flag_task():
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            flag_cancelled.set()
+            raise
+
+    async def _timer_task():
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            timer_cancelled.set()
+            raise
+
+    match._flag_task = asyncio.create_task(_flag_task())
+    match._match_timer_task = asyncio.create_task(_timer_task())
+    await asyncio.sleep(0)
+
+    await engine.destroy_match(match.match_id)
+
+    assert flag_cancelled.is_set()
+    assert timer_cancelled.is_set()
+    assert match.resources_destroyed is True
+    assert match._flag_task is None
+    assert match._match_timer_task is None
+
+
 def test_player_state_defaults_to_ssh_key_maintenance_metadata():
     player = PlayerState(player_id=1, container_name="c1", target_container="t1", target_ip="10.0.0.1")
 
@@ -220,14 +311,11 @@ async def test_setup_containers_passes_public_key_to_target_env(monkeypatch):
             public_key="PUBLIC\n",
         )
 
-    async def fake_create_subprocess_shell(command, stdout=None, stderr=None):
-        if command.startswith("docker inspect --format"):
-            return _FakeProcess(b"10.0.0.8\n")
-        if command.startswith("docker exec"):
-            return _FakeProcess(b"ok\n", returncode=0)
-        raise AssertionError(command)
-
     async def fake_create_subprocess_exec(*command, stdin=None, stdout=None, stderr=None):
+        if command[:3] == ("docker", "inspect", "--format"):
+            return _FakeProcess(b"10.0.0.8\n")
+        if command[:6] == ("docker", "exec", "-i", "-u", "node", "claw_match_setup_1"):
+            return _FakeProcess(b"")
         if command[:6] == ("docker", "exec", "-i", "-u", "root", "claw_match_setup_1"):
             return _FakeProcess(b"")
         if command[:3] == ("docker", "exec", "claw_match_setup_1"):
@@ -240,7 +328,6 @@ async def test_setup_containers_passes_public_key_to_target_env(monkeypatch):
     monkeypatch.setattr(main.docker, "from_env", lambda: fake_client)
     monkeypatch.setattr(main, "_choose_available_subnet", lambda client, subnets: (subnets[0], "10.100.1.1"))
     monkeypatch.setattr(engine, "_generate_player_ssh_keypair", fake_generate)
-    monkeypatch.setattr(main.asyncio, "create_subprocess_shell", fake_create_subprocess_shell)
     monkeypatch.setattr(main.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
 
@@ -266,13 +353,6 @@ async def test_setup_containers_installs_private_key_and_target_ssh_helper(monke
             public_key="PUBLIC\n",
         )
 
-    async def fake_create_subprocess_shell(command, stdout=None, stderr=None):
-        if command.startswith("docker inspect --format"):
-            return _FakeProcess(b"10.0.0.8\n")
-        if command.startswith("docker exec"):
-            return _FakeProcess(b"ok\n", returncode=0)
-        raise AssertionError(command)
-
     async def fake_create_subprocess_exec(*command, stdin=None, stdout=None, stderr=None):
         def on_communicate(input_bytes):
             exec_calls.append({
@@ -280,6 +360,10 @@ async def test_setup_containers_installs_private_key_and_target_ssh_helper(monke
                 "stdin": input_bytes.decode("utf-8") if input_bytes else None,
             })
 
+        if command[:3] == ("docker", "inspect", "--format"):
+            return _FakeProcess(b"10.0.0.8\n")
+        if command[:6] == ("docker", "exec", "-i", "-u", "node", "claw_match_setup_1"):
+            return _FakeProcess(b"", on_communicate=on_communicate)
         if command[:6] == ("docker", "exec", "-i", "-u", "root", "claw_match_setup_1"):
             return _FakeProcess(b"", on_communicate=on_communicate)
         if command[:3] == ("docker", "exec", "claw_match_setup_1"):
@@ -292,7 +376,6 @@ async def test_setup_containers_installs_private_key_and_target_ssh_helper(monke
     monkeypatch.setattr(main.docker, "from_env", lambda: fake_client)
     monkeypatch.setattr(main, "_choose_available_subnet", lambda client, subnets: (subnets[0], "10.100.1.1"))
     monkeypatch.setattr(engine, "_generate_player_ssh_keypair", fake_generate)
-    monkeypatch.setattr(main.asyncio, "create_subprocess_shell", fake_create_subprocess_shell)
     monkeypatch.setattr(main.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
 
@@ -303,7 +386,7 @@ async def test_setup_containers_installs_private_key_and_target_ssh_helper(monke
         if call["stdin"] == "PRIVATE\n"
     )
     assert private_key_write["command"][:6] == (
-        "docker", "exec", "-i", "-u", "root", "claw_match_setup_1"
+        "docker", "exec", "-i", "-u", "node", "claw_match_setup_1"
     )
     assert private_key_write["command"][-1].startswith(
         "mkdir -p /home/node/.ssh && chmod 700 /home/node/.ssh && cat > /home/node/.ssh/awd_target_key"
@@ -343,6 +426,80 @@ async def test_verify_agent_target_ssh_uses_ready_probe(monkeypatch):
         "command": ["sh", "-lc", "/usr/local/bin/target-ssh 'echo ready'"],
         "kwargs": {"timeout": 15},
     }]
+
+
+@pytest.mark.asyncio
+async def test_docker_exec_failure_includes_stdout_and_stderr(monkeypatch):
+    main = _load_main_module("test_main_docker_exec_failure_details")
+    engine = main.RefereeEngine()
+
+    async def fake_create_subprocess_exec(*command, stdin=None, stdout=None, stderr=None):
+        assert command[:3] == ("docker", "exec", "claw-test")
+        return _FakeProcess(
+            b"web: ERROR (spawn error)\n",
+            returncode=1,
+            stderr=b"Warning: Permanently added host key.\n",
+        )
+
+    monkeypatch.setattr(main.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await engine._docker_exec("claw-test", ["sh", "-lc", "target-ssh 'supervisorctl restart web'"])
+
+    details = str(exc_info.value)
+    assert "Warning: Permanently added host key." in details
+    assert "stdout: web: ERROR (spawn error)" in details
+
+
+@pytest.mark.asyncio
+async def test_install_agent_target_ssh_rejects_unsafe_container_paths():
+    main = _load_main_module("test_main_ssh_rejects_unsafe_paths")
+    engine = main.RefereeEngine()
+    material = main.PlayerSSHKeyMaterial(
+        player_id=1,
+        private_key="PRIVATE\n",
+        public_key="PUBLIC\n",
+        private_key_path="/home/node/.ssh/key; touch /tmp/pwned",
+    )
+
+    with pytest.raises(ValueError, match="invalid target SSH private_key_path"):
+        await engine._install_agent_target_ssh(
+            1,
+            "claw-test",
+            "10.0.0.8",
+            material,
+        )
+
+
+@pytest.mark.asyncio
+async def test_install_agent_target_ssh_quotes_valid_dynamic_paths(monkeypatch):
+    main = _load_main_module("test_main_ssh_quotes_paths")
+    engine = main.RefereeEngine()
+    material = main.PlayerSSHKeyMaterial(
+        player_id=1,
+        private_key="PRIVATE\n",
+        public_key="PUBLIC\n",
+        private_key_path="/home/node/.ssh/awd+target_key",
+        helper_path="/usr/local/bin/target-ssh",
+    )
+    calls = []
+
+    async def fake_docker_exec(container_name, command, **kwargs):
+        calls.append((container_name, command, kwargs))
+        return ""
+
+    monkeypatch.setattr(engine, "_docker_exec", fake_docker_exec)
+
+    await engine._install_agent_target_ssh(
+        1,
+        "claw-test",
+        "10.0.0.8",
+        material,
+    )
+
+    assert calls[0][1][:2] == ["sh", "-lc"]
+    assert "cat > /home/node/.ssh/awd+target_key" in calls[0][1][2]
+    assert calls[1][1][2] == "cat > /usr/local/bin/target-ssh && chmod 755 /usr/local/bin/target-ssh"
 
 
 @pytest.mark.asyncio

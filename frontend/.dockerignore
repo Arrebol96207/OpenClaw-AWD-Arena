@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.npm-cache/
+.vite/
+coverage/
+.pytest-tmp*/
+test-results/
+playwright-report/
+*.log
+vite-dev.*.log
+.env
+.env.*
+!.env.example

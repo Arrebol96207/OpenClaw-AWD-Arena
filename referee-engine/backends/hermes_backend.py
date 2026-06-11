@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from agent_client import AgentClient, AgentSession, InitResult, MESSAGE_MODE_NORMAL
 
-from .base import AgentBackendAdapter, BackendContainerSpec, BackendTargetSSHSpec, StreamCallback
+from .base import AgentBackendAdapter, BackendContainerSpec, BackendTargetSSHSpec, StreamCallback, normalize_provider_api
 
 
 logger = logging.getLogger(__name__)
@@ -30,11 +30,12 @@ class HermesAgentClient(AgentClient):
 
     def build_agent_exec_command(self, session: AgentSession, message_b64: str, timeout: int) -> str:
         wrapper = HERMES_WRAPPER_PY
+        safe_timeout = max(1, int(timeout))
         return (
             "sh -lc '"
-            f"echo {message_b64} | base64 -d > /tmp/hermes_prompt.txt && "
+            f"printf %s {shlex.quote(message_b64)} | base64 -d > /tmp/hermes_prompt.txt && "
             "if command -v python3 >/dev/null 2>&1; then PYTHON_BIN=python3; else PYTHON_BIN=python; fi && "
-            f"\"$PYTHON_BIN\" {wrapper} agent --agent main -m \"$(cat /tmp/hermes_prompt.txt)\" --json --timeout {timeout}"
+            f"\"$PYTHON_BIN\" {shlex.quote(wrapper)} agent --agent main -m \"$(cat /tmp/hermes_prompt.txt)\" --json --timeout {safe_timeout}"
             "'"
         )
 
@@ -45,7 +46,7 @@ class HermesAgentClient(AgentClient):
             candidate_file = f"{self.HERMES_SESSION_DIR}/session_{session.session_id}.json"
             exists = await self._exec(
                 session.container_name,
-                f"test -f {candidate_file} && printf ok",
+                f"test -f {self._quote_container_path(candidate_file)} && printf ok",
             )
             if exists.strip() == "ok":
                 session_file = candidate_file
@@ -58,7 +59,7 @@ class HermesAgentClient(AgentClient):
         if session_file is None:
             result = await self._exec(
                 session.container_name,
-                f"sh -lc 'ls -t {self.HERMES_SESSION_DIR}/session_*.json 2>/dev/null | head -1'",
+                f"sh -lc {shlex.quote(f'ls -t {self.HERMES_SESSION_DIR}/session_*.json 2>/dev/null | head -1')}",
             )
 
             if not result.strip():
@@ -134,6 +135,18 @@ class HermesBackendAdapter(AgentBackendAdapter):
     backend_type = "hermes"
 
     @staticmethod
+    def _resolve_player_llm(match_config: Any, player_config: Any) -> tuple[str, str, str, str]:
+        config = getattr(match_config, "config", match_config)
+        llm_config = getattr(config, "llm", None)
+        api_key = getattr(player_config, "apiKey", None) or getattr(llm_config, "apiKey", "")
+        base_url = getattr(player_config, "baseUrl", None) or getattr(llm_config, "baseUrl", "")
+        model = getattr(player_config, "model", None) or getattr(llm_config, "model", "gpt-5.5")
+        provider_api = getattr(player_config, "api", None) or getattr(player_config, "provider", None) or getattr(
+            llm_config, "provider", "openai-completions"
+        )
+        return api_key, base_url, model, normalize_provider_api(provider_api)
+
+    @staticmethod
     def _sanitize_volume_component(value: Any) -> str:
         sanitized = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(value or "unknown")).strip("-.")
         return sanitized or "unknown"
@@ -150,15 +163,14 @@ class HermesBackendAdapter(AgentBackendAdapter):
         image_override = getattr(backend_config, "image", None) if backend_config is not None else None
         extra_env = getattr(backend_config, "extra_env", None) if backend_config is not None else None
         llm_config = getattr(config, "llm", None)
-        llm_api_key = getattr(player_config, "apiKey", None) or getattr(llm_config, "apiKey", "")
-        llm_base_url = getattr(llm_config, "baseUrl", "")
-        llm_model = getattr(player_config, "model", None) or getattr(llm_config, "model", "")
+        llm_api_key, llm_base_url, llm_model, llm_provider_api = self._resolve_player_llm(config, player_config)
         llm_proxy = getattr(llm_config, "proxy", "")
 
         environment = {
             "OPENAI_API_KEY": llm_api_key,
             "OPENAI_BASE_URL": llm_base_url,
             "OPENAI_MODEL": llm_model,
+            "OPENCLAW_PROVIDER_API": llm_provider_api,
             "HERMES_MODEL": llm_model,
             "HTTPS_PROXY": llm_proxy,
             "HTTP_PROXY": llm_proxy,
@@ -186,11 +198,13 @@ class HermesBackendAdapter(AgentBackendAdapter):
     def create_client(self, match_config: Any, player_config: Any) -> HermesAgentClient:
         config = getattr(match_config, "config", match_config)
         llm_config = getattr(config, "llm", None)
+        llm_api_key, llm_base_url, llm_model, llm_provider_api = self._resolve_player_llm(config, player_config)
         return HermesAgentClient(
-            llm_api_key=getattr(player_config, "apiKey", None) or getattr(llm_config, "apiKey", ""),
-            llm_base_url=getattr(llm_config, "baseUrl", ""),
-            llm_model=getattr(player_config, "model", None) or getattr(llm_config, "model", "claude-sonnet-4-6"),
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
             proxy_url=getattr(llm_config, "proxy", "http://host.docker.internal:7897"),
+            provider_api=llm_provider_api,
         )
 
     def resolve_target_ssh_spec(self, match_config: Any, player_config: Any) -> BackendTargetSSHSpec:
@@ -285,8 +299,11 @@ class HermesBackendAdapter(AgentBackendAdapter):
 
     async def cleanup(self, match: Any, player_id: int, session: Any, client: HermesAgentClient) -> None:
         volume_name = self._resolve_runtime_volume_name(match, SimpleNamespace(id=player_id))
-        proc = await asyncio.create_subprocess_shell(
-            f"docker volume rm {shlex.quote(volume_name)}",
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            "volume",
+            "rm",
+            volume_name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

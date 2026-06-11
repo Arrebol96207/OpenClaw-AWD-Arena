@@ -113,6 +113,10 @@ def _sync_custom_provider_config() -> None:
         ),
         encoding="utf-8",
     )
+    try:
+        os.chmod(HERMES_CONFIG_PATH, 0o600)
+    except OSError:
+        pass
 
 
 def _prepare_subprocess_env() -> dict[str, str]:

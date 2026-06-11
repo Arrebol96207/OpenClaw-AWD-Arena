@@ -1,6 +1,9 @@
-import React, { useEffect, useState, useRef } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { API_BASE, fetchApi } from '../api'
+import { Bot, CheckCircle2, FileDown, Play, RotateCcw, Save, Upload, Wand2, Zap } from 'lucide-react'
+import { API_BASE, fetchApi, fetchJson, readApiError } from '../api'
+import { Button, ErrorBanner, Field, Panel, StatusBadge, cx, inputClassName } from '../components/ui'
+import { useProtectedApiAccess } from '../hooks/useProtectedApiAccess'
 
 type Template = {
   id: string
@@ -21,12 +24,16 @@ type Player = {
   name: string
   model: string
   apiKey?: string
+  baseUrl?: string
+  provider?: string
+  api?: string
   gatewayPort: number
   backendType: 'openclaw' | 'hermes'
   backendConfig: PlayerBackendConfig
 }
 
 type ConfigState = {
+  mode: 'awd' | 'werewolf'
   matchName: string
   totalDuration: number
   defenseDuration: number
@@ -41,174 +48,460 @@ type ConfigState = {
   flagsRefreshInterval?: number
   targetImage?: string
   agentImage?: string
+  werewolfBoard: 'standard_guard' | 'white_wolf_king_knight'
+  werewolfMaxDays: number
+  werewolfSheriffEnabled: boolean
+  werewolfRevealEnabled: boolean
+  werewolfPreMatchTraining: boolean
+  werewolfAiJudgeEnabled: boolean
+  werewolfSpeechSeconds: number
+  werewolfVoteSeconds: number
+  werewolfNightActionSeconds: number
 }
+
+type TemplateResponse = {
+  template?: {
+    config?: Record<string, unknown>
+  }
+}
+
+type TestLlmResponse = {
+  success?: boolean
+  latency?: number
+  error?: string
+}
+
+const RECENT_MODELS_STORAGE_KEY = 'OPENCLAW_RECENT_MODELS'
+const MAX_RECENT_MODELS = 20
+const DEFAULT_LLM_BASE_URL = 'https://api.findmini.top/gpt'
+const DEFAULT_LLM_MODEL = 'gpt-5.5'
+type WerewolfBoard = ConfigState['werewolfBoard']
+const WEREWOLF_DECKS = [
+  {
+    id: 'standard_guard',
+    name: '12 人预女猎守',
+    description: '预女猎守 · 警长 · 狼人自爆',
+    roles: { werewolf: 4, white_wolf_king: 0, villager: 4, seer: 1, witch: 1, hunter: 1, guard: 1, knight: 0 },
+  },
+  {
+    id: 'white_wolf_king_knight',
+    name: '12 人白狼王骑士',
+    description: '3 狼 + 白狼王 · 预女猎骑 · 无守卫',
+    roles: { werewolf: 3, white_wolf_king: 1, villager: 4, seer: 1, witch: 1, hunter: 1, guard: 0, knight: 1 },
+  },
+] as const
+
+const getWerewolfDeck = (board: WerewolfBoard) =>
+  WEREWOLF_DECKS.find((deck) => deck.id === board) ?? WEREWOLF_DECKS[0]
+
+const roleSummary = (roles: (typeof WEREWOLF_DECKS)[number]['roles']): string =>
+  [
+    roles.werewolf ? `${roles.werewolf} 狼` : null,
+    roles.white_wolf_king ? `${roles.white_wolf_king} 白狼王` : null,
+    roles.villager ? `${roles.villager} 民` : null,
+    roles.seer ? '预言家' : null,
+    roles.witch ? '女巫' : null,
+    roles.hunter ? '猎人' : null,
+    roles.guard ? '守卫' : null,
+    roles.knight ? '骑士' : null,
+  ].filter(Boolean).join(' · ')
+
+// LLM provider presets — choose to auto-fill provider / baseUrl / common model name.
+type LlmPreset = {
+  id: string
+  label: string
+  provider: string
+  baseUrl: string
+  defaultModel: string
+  hint?: string
+}
+const LLM_PRESETS: LlmPreset[] = [
+  { id: 'deepseek', label: 'DeepSeek (推荐)', provider: 'Custom', baseUrl: 'https://api.deepseek.com', defaultModel: 'deepseek-v4-pro', hint: '便宜稳定，强烈推荐' },
+  { id: 'openai', label: 'OpenAI', provider: 'OpenAI', baseUrl: 'https://api.openai.com', defaultModel: 'gpt-4o-mini' },
+  { id: 'anthropic', label: 'Anthropic', provider: 'Anthropic', baseUrl: 'https://api.anthropic.com', defaultModel: 'claude-sonnet-4-5' },
+  { id: 'findmini', label: 'FindMini 网关', provider: 'Custom', baseUrl: 'https://api.findmini.top/gpt', defaultModel: 'gpt-5.5' },
+  { id: 'custom', label: '自定义', provider: 'Custom', baseUrl: '', defaultModel: '' },
+]
+
+const COMMON_MODEL_LIBRARY = [
+  DEFAULT_LLM_MODEL,
+  'gpt-5.4',
+  'deepseek-v4-pro',
+  'gpt-4o-mini',
+  'claude-sonnet-4-5',
+]
+
+const normalizeModelName = (model: string | undefined): string => model?.trim() ?? ''
 
 const defaultPlayer = (idx: number, port: number): Player => ({
   id: idx,
   name: `Player ${idx}`,
-  model: 'default-model',
+  model: DEFAULT_LLM_MODEL,
   apiKey: '',
+  baseUrl: '',
+  provider: '',
+  api: '',
   gatewayPort: port,
   backendType: 'openclaw',
   backendConfig: {},
 })
 
+const defaultConfig = (): ConfigState => ({
+  mode: 'awd',
+  matchName: 'OpenClaw AWD Match',
+  totalDuration: 20,
+  defenseDuration: 10,
+  repeatCount: 1,
+  llmProvider: 'Custom',
+  llmBaseUrl: DEFAULT_LLM_BASE_URL,
+  llmApiKey: '',
+  llmProxy: '',
+  playerCount: 4,
+  players: Array.from({ length: 4 }).map((_, i) => defaultPlayer(i + 1, 18789 + i)),
+  scoring: { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 },
+  flagsRefreshInterval: 5,
+  targetImage: 'openclaw/ctf-target:v1',
+  agentImage: 'openclaw/local-agent:ssh',
+  werewolfBoard: 'standard_guard',
+  werewolfMaxDays: 6,
+  werewolfSheriffEnabled: true,
+  werewolfRevealEnabled: true,
+  werewolfPreMatchTraining: true,
+  werewolfAiJudgeEnabled: true,
+  werewolfSpeechSeconds: 45,
+  werewolfVoteSeconds: 60,
+  werewolfNightActionSeconds: 45,
+})
+
+const werewolfConfig = (): ConfigState => ({
+  ...defaultConfig(),
+  mode: 'werewolf',
+  matchName: `OpenClaw 狼人杀 12P ${formatTimestamp(new Date())}`,
+  totalDuration: 90,
+  defenseDuration: 0,
+  repeatCount: 1,
+  playerCount: 12,
+  players: Array.from({ length: 12 }).map((_, i) => ({
+    ...defaultPlayer(i + 1, 18789 + i),
+    name: `Player ${i + 1}`,
+  })),
+})
+
+const loadRecentModels = (): string[] => {
+  try {
+    const raw = localStorage.getItem(RECENT_MODELS_STORAGE_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed)
+      ? Array.from(new Set(parsed.map((item) => normalizeModelName(String(item))).filter(Boolean))).slice(0, MAX_RECENT_MODELS)
+      : []
+  } catch {
+    return []
+  }
+}
+
+const saveRecentModels = (models: string[]) => {
+  try {
+    localStorage.setItem(RECENT_MODELS_STORAGE_KEY, JSON.stringify(models))
+  } catch {
+    // localStorage can be unavailable in hardened browser contexts; keep the in-memory list working.
+  }
+}
+
+const formatTimestamp = (date: Date): string => {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}`
+}
+
+const displayModelName = (model: string | undefined): string => {
+  const trimmed = normalizeModelName(model)
+  if (!trimmed) return ''
+  return trimmed.split('/').pop() ?? trimmed
+}
+
+const buildAutoMatchName = (config: ConfigState): string => {
+  const duration = Math.max(1, Number(config.totalDuration) || 1)
+  if (config.mode === 'werewolf') return `狼人杀 12P ${duration}m ${formatTimestamp(new Date())}`
+  return `AWD ${config.players.length}P ${duration}m ${formatTimestamp(new Date())}`
+}
+
+const buildAutoPlayerName = (player: Player, index: number): string => {
+  const model = displayModelName(player.model)
+  return model ? `${model}（P${index + 1}）` : `Player ${index + 1}`
+}
+
+const statusTone = (success: boolean | null) => {
+  if (success === true) return 'success'
+  if (success === false) return 'danger'
+  return 'neutral'
+}
+
 const ConfigPage: React.FC = () => {
   const navigate = useNavigate()
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const protectedApi = useProtectedApiAccess()
   const [templates, setTemplates] = useState<Template[]>([])
-  const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null)
+  const [selectedTemplate, setSelectedTemplate] = useState('')
   const [showSave, setShowSave] = useState(false)
   const [saveName, setSaveName] = useState('')
   const [saveDesc, setSaveDesc] = useState('')
   const [importError, setImportError] = useState<string | null>(null)
-  const [isStarting, setIsStarting] = useState(false)
+  const [templateNotice, setTemplateNotice] = useState<string | null>(null)
+  const [isSavingTemplate, setIsSavingTemplate] = useState(false)
+  const [isImportingTemplate, setIsImportingTemplate] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
-  
+  const [isStarting, setIsStarting] = useState(false)
   const [testingGlobalLlm, setTestingGlobalLlm] = useState(false)
   const [testingPlayerId, setTestingPlayerId] = useState<number | null>(null)
-
-  const [config, setConfig] = useState<ConfigState>({
-    matchName: 'OpenClaw AWD Match',
-    totalDuration: 20,
-    defenseDuration: 10,
-    repeatCount: 1,
-    llmProvider: 'OpenAI',
-    llmBaseUrl: 'https://api.openai.com/v1',
-    llmApiKey: '',
-    llmProxy: '',
-    playerCount: 4,
-    players: Array.from({ length: 4 }).map((_, i) => defaultPlayer(i + 1, 18789 + i)),
-    scoring: { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 },
-    flagsRefreshInterval: 5,
-    targetImage: 'openclaw/ctf-target:v1',
-    agentImage: 'alpine/openclaw:latest',
-  })
+  const [testStatus, setTestStatus] = useState<Partial<Record<number | 'global', { success: boolean; message: string }>>>({})
+  const [recentModels, setRecentModels] = useState<string[]>([])
+  const [modelApplyTarget, setModelApplyTarget] = useState<number | 'all'>(1)
+  const [config, setConfig] = useState<ConfigState>(() => defaultConfig())
 
   const attackDuration = Math.max(0, config.totalDuration - config.defenseDuration)
   const canStart = config.matchName.trim().length > 0 && config.players.length > 0
-  const fileRef = useRef<HTMLInputElement | null>(null)
+  const isWerewolf = config.mode === 'werewolf'
+  const selectedWerewolfDeck = getWerewolfDeck(config.werewolfBoard)
+  const apiActionsDisabled = protectedApi.loading || !protectedApi.ready
+
+  const trustedModelOptions = useMemo(
+    () => Array.from(new Set([
+      ...recentModels,
+      ...LLM_PRESETS.map((preset) => normalizeModelName(preset.defaultModel)).filter(Boolean),
+      ...COMMON_MODEL_LIBRARY,
+    ])).slice(0, MAX_RECENT_MODELS),
+    [recentModels],
+  )
+
+  const modelOptions = useMemo(
+    () => Array.from(new Set([
+      ...trustedModelOptions,
+      ...config.players.map((p) => normalizeModelName(p.model)).filter(Boolean),
+    ])).slice(0, MAX_RECENT_MODELS),
+    [config.players, trustedModelOptions],
+  )
 
   useEffect(() => {
-    setConfig((c) => {
-      const current = c.players
-      const n = c.playerCount
-      if (current.length === n) return c
+    setRecentModels(loadRecentModels())
+  }, [])
+
+  useEffect(() => {
+    setModelApplyTarget((target) => {
+      if (target === 'all') return target
+      return config.players.some((player) => player.id === target) ? target : config.players[0]?.id ?? 'all'
+    })
+  }, [config.players])
+
+  useEffect(() => {
+    setConfig((currentConfig) => {
+      const current = currentConfig.players
+      const n = currentConfig.playerCount
+      if (currentConfig.mode === 'werewolf') {
+        const players = Array.from({ length: 12 }).map((_, i) => current[i] ?? defaultPlayer(i + 1, 18789 + i))
+        return { ...currentConfig, playerCount: 12, players }
+      }
+      if (current.length === n) return currentConfig
       if (current.length < n) {
         const added = Array.from({ length: n - current.length }).map((_, i) =>
-          defaultPlayer(current.length + i + 1, 18789 + current.length + i)
+          defaultPlayer(current.length + i + 1, 18789 + current.length + i),
         )
-        return { ...c, players: [...current, ...added] }
+        return { ...currentConfig, players: [...current, ...added] }
       }
-      return { ...c, players: current.slice(0, n) }
+      return { ...currentConfig, players: current.slice(0, n) }
     })
   }, [config.playerCount])
 
   useEffect(() => {
-    fetchApi(`${API_BASE}/api/templates`)
-      .then((r) => r.json())
-      .then((data) => {
-        const t = Array.isArray(data) ? data : data.templates ?? []
-        setTemplates(t)
-      })
-      .catch(() => {})
-  }, [])
+    const loadTemplates = () => {
+      if (!protectedApi.ready) {
+        setTemplates([])
+        return
+      }
+      fetchJson<{ templates?: Template[] } | Template[]>(`${API_BASE}/api/templates`)
+        .then((data) => setTemplates(Array.isArray(data) ? data : data.templates ?? []))
+        .catch(() => setTemplates([]))
+    }
 
-  const applyTemplate = (id: string) => {
-    setSelectedTemplate(id)
-    fetchApi(`${API_BASE}/api/templates/${id}`)
-      .then((r) => r.json())
-      .then((data: { template?: { config?: Record<string, unknown> } }) => {
-        const tplConfig = data?.template?.config
-        if (tplConfig) {
-          const match = tplConfig.match as Record<string, unknown> | undefined
-          const llm = tplConfig.llm as Record<string, unknown> | undefined
-          const players = tplConfig.players as Player[] | undefined
-          setConfig((c) => ({
-            ...c,
-            matchName: (match?.name as string) ?? c.matchName,
-            totalDuration: match?.duration ? Math.round((match.duration as number) / 60) : c.totalDuration,
-            defenseDuration: match?.phases ? Math.round(((match.phases as Record<string, number>).defense ?? 600) / 60) : c.defenseDuration,
-            repeatCount: typeof tplConfig.repeatCount === 'number'
-              ? tplConfig.repeatCount
-              : typeof (tplConfig.loop as { repeatCount?: unknown } | undefined)?.repeatCount === 'number'
-                ? ((tplConfig.loop as { repeatCount?: number }).repeatCount ?? c.repeatCount)
-                : c.repeatCount,
-            llmProvider: (llm?.provider as string) ?? c.llmProvider,
-            llmBaseUrl: (llm?.baseUrl as string) ?? c.llmBaseUrl,
-            playerCount: players ? players.length : c.playerCount,
-            players: players
-              ? players.map((p, i) => {
-                  const bt = (p as { backendType?: string }).backendType ?? 
-                             ((p as { backend_type?: string }).backend_type) ?? 
-                             'openclaw'
-                  return {
-                    id: p.id ?? i + 1,
-                    name: p.name ?? `Player ${p.id ?? i + 1}`,
-                    model: p.model ?? c.players[i]?.model ?? '',
-                    apiKey: '',
-                    gatewayPort: p.gatewayPort ?? 18789 + i,
-                    backendType: bt === 'hermes' ? 'hermes' as const : 'openclaw' as const,
-                    backendConfig: (p as { backendConfig?: PlayerBackendConfig }).backendConfig ?? 
-                                  ((p as { backend_config?: PlayerBackendConfig }).backend_config as PlayerBackendConfig) ?? 
-                                  {},
-                  }
-                })
-              : c.players,
-          }))
-        }
-        fetchApi(`${API_BASE}/api/templates/${id}/use`, { method: 'POST' }).catch(() => {})
-      })
-      .catch(() => {})
-  }
+    loadTemplates()
+    window.addEventListener('REFEREE_API_KEY_CHANGED', loadTemplates)
+    return () => window.removeEventListener('REFEREE_API_KEY_CHANGED', loadTemplates)
+  }, [protectedApi.ready])
 
   const update = <K extends keyof ConfigState>(key: K, value: ConfigState[K]) => {
-    setConfig((c) => ({ ...c, [key]: value }))
+    setConfig((current) => ({ ...current, [key]: value }))
   }
 
-  const testLlm = async (baseUrl: string, apiKey: string, proxy: string | undefined, model: string, isGlobal: boolean, playerId?: number) => {
-    if (!baseUrl) {
-      alert('请先填写 Base URL');
-      return;
+  const updatePlayer = (idx: number, patch: Partial<Player>) => {
+    setConfig((current) => {
+      const players = current.players.slice()
+      players[idx] = { ...players[idx], ...patch }
+      return { ...current, players }
+    })
+  }
+
+  const rememberRecentModel = (model: string | undefined) => {
+    const normalized = normalizeModelName(model)
+    if (!normalized) return
+
+    setRecentModels((previous) => {
+      const next = [normalized, ...previous.filter((item) => item !== normalized)].slice(0, MAX_RECENT_MODELS)
+      saveRecentModels(next)
+      return next
+    })
+  }
+
+  const upsertTemplate = (template: Template) => {
+    setTemplates((previous) => {
+      const filtered = previous.filter((item) => item.id !== template.id)
+      return [template, ...filtered]
+    })
+    setSelectedTemplate(template.id)
+  }
+
+  const clearTransientState = () => {
+    setSelectedTemplate('')
+    setShowSave(false)
+    setSaveName('')
+    setSaveDesc('')
+    setImportError(null)
+    setTemplateNotice(null)
+    setIsSavingTemplate(false)
+    setIsImportingTemplate(false)
+    setStartError(null)
+    setTestStatus({})
+    setTestingGlobalLlm(false)
+    setTestingPlayerId(null)
+  }
+
+  const resetToConfig = (nextConfig: ConfigState) => {
+    clearTransientState()
+    setModelApplyTarget(nextConfig.players[0]?.id ?? 'all')
+    setConfig(nextConfig)
+  }
+
+  const applyTemplate = async (id: string) => {
+    setSelectedTemplate(id)
+    setImportError(null)
+    setStartError(null)
+    setTestStatus({})
+    try {
+      const data = await fetchJson<TemplateResponse>(`${API_BASE}/api/templates/${id}`)
+      const tplConfig = data?.template?.config
+      if (!tplConfig) return
+
+      const match = tplConfig.match as Record<string, unknown> | undefined
+      const llm = tplConfig.llm as Record<string, unknown> | undefined
+      const players = tplConfig.players as Player[] | undefined
+      setConfig((current) => ({
+        ...current,
+        matchName: (match?.name as string) ?? current.matchName,
+        totalDuration: typeof match?.duration === 'number' ? Math.round(match.duration / 60) : current.totalDuration,
+        defenseDuration: match?.phases
+          ? Math.round(((match.phases as Record<string, number>).defense ?? 600) / 60)
+          : current.defenseDuration,
+        repeatCount: typeof tplConfig.repeatCount === 'number'
+          ? tplConfig.repeatCount
+          : typeof (tplConfig.loop as { repeatCount?: unknown } | undefined)?.repeatCount === 'number'
+            ? ((tplConfig.loop as { repeatCount?: number }).repeatCount ?? current.repeatCount)
+            : current.repeatCount,
+        llmProvider: (llm?.provider as string) ?? current.llmProvider,
+        llmBaseUrl: (llm?.baseUrl as string) ?? current.llmBaseUrl,
+        playerCount: players ? players.length : current.playerCount,
+        players: players
+          ? players.map((player, i) => {
+              const backendType = (player as { backendType?: string }).backendType
+                ?? ((player as { backend_type?: string }).backend_type)
+                ?? 'openclaw'
+              return {
+                id: player.id ?? i + 1,
+                name: player.name ?? `Player ${player.id ?? i + 1}`,
+                model: player.model ?? current.players[i]?.model ?? '',
+                apiKey: '',
+                baseUrl: (player as { baseUrl?: string }).baseUrl ?? '',
+                provider: (player as { provider?: string }).provider ?? '',
+                api: (player as { api?: string }).api ?? '',
+                gatewayPort: player.gatewayPort ?? 18789 + i,
+                backendType: backendType === 'hermes' ? 'hermes' : 'openclaw',
+                backendConfig: (player as { backendConfig?: PlayerBackendConfig }).backendConfig
+                  ?? ((player as { backend_config?: PlayerBackendConfig }).backend_config as PlayerBackendConfig)
+                  ?? {},
+              }
+            })
+          : current.players,
+      }))
+      fetchApi(`${API_BASE}/api/templates/${id}/use`, { method: 'POST' }).catch(() => {})
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : '模板加载失败')
     }
-    if (!apiKey) {
-      alert('请先填写 API Key');
-      return;
-    }
-    if (!model) {
-      alert('请先填写模型名称');
-      return;
+  }
+
+  const testLlm = async (
+    baseUrl: string,
+    apiKey: string,
+    proxy: string | undefined,
+    model: string,
+    isGlobal: boolean,
+    playerId?: number,
+  ) => {
+    const target = isGlobal ? 'global' : playerId
+    if (!target) return
+    if (!protectedApi.ready) {
+      setTestStatus((previous) => ({
+        ...previous,
+        [target]: { success: false, message: protectedApi.message ?? '裁判引擎状态未就绪，请稍后重试' },
+      }))
+      return
     }
 
-    if (isGlobal) setTestingGlobalLlm(true);
-    else if (playerId) setTestingPlayerId(playerId);
+    if (!baseUrl || !apiKey || !model) {
+      setTestStatus((previous) => ({
+        ...previous,
+        [target]: { success: false, message: '请填写 Base URL、API Key 和模型名称' },
+      }))
+      return
+    }
+
+    if (isGlobal) setTestingGlobalLlm(true)
+    else setTestingPlayerId(playerId ?? null)
 
     try {
-      const res = await fetchApi(`${API_BASE}/api/test-llm`, {
+      const data = await fetchJson<TestLlmResponse>(`${API_BASE}/api/test-llm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ baseUrl, apiKey, proxy, model }),
-      });
-      const data = await res.json();
+      })
+
       if (data.success) {
-        alert(`测试成功！延迟: ${(data.latency * 1000).toFixed(0)}ms`);
+        rememberRecentModel(model)
+        const latencyMs = data.latency != null ? `${(data.latency * 1000).toFixed(0)}ms` : 'ok'
+        setTestStatus((previous) => ({
+          ...previous,
+          [target]: { success: true, message: `可用，延迟 ${latencyMs}` },
+        }))
       } else {
-        alert(`测试失败: ${data.error}`);
+        setTestStatus((previous) => ({
+          ...previous,
+          [target]: { success: false, message: data.error ?? '测试失败' },
+        }))
       }
-    } catch (e: any) {
-      alert(`测试异常: ${e.message}`);
+    } catch (error) {
+      setTestStatus((previous) => ({
+        ...previous,
+        [target]: { success: false, message: error instanceof Error ? error.message : '测试异常' },
+      }))
     } finally {
-      if (isGlobal) setTestingGlobalLlm(false);
-      else if (playerId) setTestingPlayerId(null);
+      if (isGlobal) setTestingGlobalLlm(false)
+      else setTestingPlayerId(null)
     }
   }
 
   const startMatch = async () => {
-    if (isStarting || !canStart) return
-
+    if (isStarting || !canStart || !protectedApi.ready) return
     setStartError(null)
     setIsStarting(true)
+    const werewolfDeck = getWerewolfDeck(config.werewolfBoard)
 
     const payload = {
+      mode: config.mode,
       match: {
         name: config.matchName,
         duration: config.totalDuration * 60,
@@ -227,17 +520,20 @@ const ConfigPage: React.FC = () => {
         apiKey: config.llmApiKey,
         proxy: config.llmProxy,
       },
-      players: config.players.map((p) => ({
-        id: p.id,
-        name: p.name,
-        model: p.model,
-        apiKey: p.apiKey,
-        gatewayPort: p.gatewayPort,
-        backend_type: p.backendType,
+      players: config.players.map((player) => ({
+        id: player.id,
+        name: player.name,
+        model: player.model,
+        apiKey: player.apiKey,
+        baseUrl: player.baseUrl,
+        provider: player.provider,
+        api: player.api,
+        gatewayPort: player.gatewayPort,
+        backend_type: player.backendType,
         backend_config: {
-          image: p.backendConfig.image ?? null,
-          profile_name: p.backendConfig.profileName ?? null,
-          extra_env: p.backendConfig.extraEnv ?? {},
+          image: player.backendConfig.image ?? null,
+          profile_name: player.backendConfig.profileName ?? null,
+          extra_env: player.backendConfig.extraEnv ?? {},
         },
       })),
       scoring: config.scoring,
@@ -246,399 +542,570 @@ const ConfigPage: React.FC = () => {
       },
       target_image: config.targetImage,
       agent_image: config.agentImage,
+      werewolf: config.mode === 'werewolf' ? {
+        playerCount: 12,
+        board: werewolfDeck.id,
+        roles: werewolfDeck.roles,
+        sheriffEnabled: config.werewolfSheriffEnabled,
+        werewolfRevealEnabled: config.werewolfRevealEnabled,
+        maxDays: config.werewolfMaxDays,
+        speechSecondsPerPlayer: config.werewolfSpeechSeconds,
+        voteSeconds: config.werewolfVoteSeconds,
+        nightActionSeconds: config.werewolfNightActionSeconds,
+        preMatchTraining: config.werewolfPreMatchTraining,
+        aiJudgeEnabled: config.werewolfAiJudgeEnabled,
+      } : undefined,
     }
 
     try {
       const response = await fetchApi(`${API_BASE}/api/matches/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       })
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`)
-      }
-
+      if (!response.ok) throw new Error(await readApiError(response))
       const data: { match_id?: string; id?: string } = await response.json()
-      const id = data?.match_id ?? data?.id
+      const id = data.match_id ?? data.id
+      if (!id) throw new Error('后端没有返回比赛 ID')
 
-      if (!id) {
-        throw new Error('未返回比赛 ID')
-      }
-
+      config.players.forEach((player) => rememberRecentModel(player.model))
       navigate(`/arena/${id}`)
     } catch (error) {
-      const message = error instanceof Error ? error.message : '创建比赛失败'
-      setStartError(message)
+      setStartError(error instanceof Error ? error.message : '创建比赛失败')
       setIsStarting(false)
     }
   }
 
-  const onImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
+  const onImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
     if (!file) return
+
     setImportError(null)
+    setTemplateNotice(null)
+    setIsImportingTemplate(true)
     const formData = new FormData()
     formData.append('file', file)
-    fetchApi(`${API_BASE}/api/templates/import`, {
-      method: 'POST',
-      body: formData,
-    })
-      .then((resp) => {
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-        return resp.json()
+    try {
+      const response = await fetchApi(`${API_BASE}/api/templates/import`, {
+        method: 'POST',
+        body: formData,
       })
-      .then((resp: { success?: boolean; templateId?: string; template?: Template }) => {
-        const tpl = resp.template
-        if (tpl) {
-          setTemplates((old) => [...old, tpl])
-        }
+      if (!response.ok) throw new Error(await readApiError(response))
+      const payload: { template?: Template } = await response.json()
+      if (payload.template) {
+        upsertTemplate(payload.template)
+        setTemplateNotice(`已导入模板：${payload.template.name}`)
+      } else {
+        setTemplateNotice('模板导入完成')
+      }
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : '导入失败，请检查 JSON 文件')
+    } finally {
+      setIsImportingTemplate(false)
+      event.target.value = ''
+    }
+  }
+
+  const saveTemplate = async () => {
+    if (isSavingTemplate) return
+    if (!protectedApi.ready) {
+      setImportError(protectedApi.message ?? '裁判引擎状态未就绪，请稍后重试')
+      return
+    }
+    try {
+      setImportError(null)
+      setTemplateNotice(null)
+      setIsSavingTemplate(true)
+      const payload = await fetchJson<{ template?: Template }>(`${API_BASE}/api/templates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: saveName || config.matchName, description: saveDesc, config }),
       })
-      .catch(() => setImportError('Import failed — invalid JSON file or server error'))
-    e.target.value = ''
+      if (payload.template) {
+        upsertTemplate(payload.template)
+        setTemplateNotice(`已保存模板：${payload.template.name}`)
+      } else {
+        setTemplateNotice('模板保存成功')
+      }
+      setShowSave(false)
+      setSaveName('')
+      setSaveDesc('')
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : '保存模板失败')
+    } finally {
+      setIsSavingTemplate(false)
+    }
   }
 
   const useSameModelAll = () => {
-    const m = config.players[0]?.model ?? 'default-model'
-    setConfig((c) => ({ ...c, players: c.players.map((p) => ({ ...p, model: m })) }))
+    const model = config.players[0]?.model ?? DEFAULT_LLM_MODEL
+    setConfig((current) => ({ ...current, players: current.players.map((player) => ({ ...player, model })) }))
   }
+
+  const applyModelFromLibrary = (model: string) => {
+    setConfig((current) => ({
+      ...current,
+      players: current.players.map((player) => (
+        modelApplyTarget === 'all' || player.id === modelApplyTarget
+          ? { ...player, model }
+          : player
+      )),
+    }))
+  }
+
   const autoFillNames = () => {
-    setConfig((c) => ({ ...c, players: c.players.map((p, i) => ({ ...p, name: `Player ${i + 1}` })) }))
+    setConfig((current) => ({
+      ...current,
+      matchName: buildAutoMatchName(current),
+      players: current.players.map((player, index) => ({ ...player, name: buildAutoPlayerName(player, index) })),
+    }))
   }
 
   return (
-    <div className="space-y-6">
-      <section className="bg-slate-800/60 border border-slate-700 rounded-md p-4 flex flex-col gap-3">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2 text-sm text-slate-200">
-            <span>模板管理:</span>
-            <select className="bg-slate-700 rounded-md px-2 py-1" value={selectedTemplate ?? ''} onChange={(e) => applyTemplate(e.target.value)}>
-              <option value="" disabled>请选择模板</option>
-              {templates.map((t) => (
-                <option key={t.id} value={t.id}>{t.name} — {t.playerCount} 玩者, {t.duration} 分钟</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex gap-2">
-            <button className="px-3 py-2 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white" onClick={() => setShowSave(true)}>保存为模板</button>
-            <button className="px-3 py-2 rounded-md bg-slate-700 hover:bg-slate-600 text-white" onClick={() => fileRef.current?.click()}>Import</button>
-            <input ref={fileRef} type="file" accept="application/json" style={{ display: 'none' }} onChange={onImport} />
-          </div>
-        </div>
-        <div className="text-xs text-slate-300">{templates.length ? templates.length + ' templates' : 'No templates'}</div>
-      </section>
+    <div className="space-y-5">
+      <datalist id="recent-models">
+        {modelOptions.map((model) => <option key={model} value={model} />)}
+      </datalist>
 
-      <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-slate-800/60 border border-slate-700 rounded-md p-4 space-y-4">
-          <h3 className="text-lg font-semibold">基础配置</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm text-slate-300">赛事名称</label>
-              <input className="w-full bg-slate-700 rounded-md px-2 py-1" value={config.matchName} onChange={(e) => update('matchName', e.target.value)} />
+      <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-cyan-300">Match Control</div>
+          <h1 className="mt-1 text-2xl font-semibold text-white">配置大厅</h1>
+          <p className="mt-1 text-sm text-slate-400">配置选手、模型、赛制和镜像，然后发起一场可观战的比赛。</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" icon={<Wand2 className="h-4 w-4" />} onClick={autoFillNames}>
+            自动生成名称
+          </Button>
+          <Button variant="secondary" icon={<RotateCcw className="h-4 w-4" />} disabled={isStarting} onClick={() => resetToConfig(defaultConfig())}>
+            重置
+          </Button>
+          <Button variant="primary" icon={<Play className="h-4 w-4" />} loading={isStarting} disabled={!canStart || apiActionsDisabled} onClick={startMatch}>
+            {isStarting ? '创建中...' : config.repeatCount > 1 ? '开始循环比赛' : '开始比赛'}
+          </Button>
+        </div>
+      </div>
+
+      <ErrorBanner message={startError} />
+      <ErrorBanner message={importError} />
+      <ErrorBanner message={!protectedApi.loading && !protectedApi.ready ? protectedApi.message : null} />
+      {templateNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="rounded-md border border-emerald-500/40 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-100"
+        >
+          {templateNotice}
+        </div>
+      )}
+
+      <Panel title="比赛模式" eyebrow="Mode">
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant={config.mode === 'awd' ? 'primary' : 'secondary'}
+            onClick={() => {
+              resetToConfig(defaultConfig())
+            }}
+          >
+            AWD 攻防战
+          </Button>
+          <Button
+            variant={config.mode === 'werewolf' ? 'primary' : 'secondary'}
+            onClick={() => {
+              resetToConfig(werewolfConfig())
+            }}
+          >
+            12 人狼人杀
+          </Button>
+          <StatusBadge tone={isWerewolf ? 'warning' : 'info'}>
+            {isWerewolf ? '预女猎守 · 警长 · 自爆 · AI 裁判' : '靶机攻防 · Flag · SLA'}
+          </StatusBadge>
+        </div>
+      </Panel>
+
+      <Panel>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          {isWerewolf ? (
+            <div className="w-full space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm text-slate-300">狼人杀卡组</span>
+                <StatusBadge tone="warning">{WEREWOLF_DECKS.length} 个卡组</StatusBadge>
+                <StatusBadge tone="info">{selectedWerewolfDeck.description}</StatusBadge>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {WEREWOLF_DECKS.map((deck) => {
+                  const selected = config.werewolfBoard === deck.id
+                  return (
+                    <button
+                      key={deck.id}
+                      type="button"
+                      className={cx(
+                        'rounded-md border p-4 text-left transition duration-200 focus:outline-none focus:ring-2 focus:ring-cyan-400/40',
+                        selected
+                          ? 'border-cyan-400 bg-cyan-950/40 shadow-[0_0_0_1px_rgba(34,211,238,0.35)]'
+                          : 'border-slate-700 bg-slate-900/60 hover:border-slate-500 hover:bg-slate-800/70',
+                      )}
+                      onClick={() => update('werewolfBoard', deck.id)}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="font-semibold text-slate-100">{deck.name}</div>
+                        <StatusBadge tone={selected ? 'success' : 'neutral'}>{selected ? '已选择' : '可选择'}</StatusBadge>
+                      </div>
+                      <div className="mt-2 text-sm text-slate-300">{deck.description}</div>
+                      <div className="mt-3 text-xs leading-5 text-slate-500">{roleSummary(deck.roles)}</div>
+                    </button>
+                  )
+                })}
+              </div>
             </div>
-            <div>
-              <label className="block text-sm text-slate-300">总时长</label>
-              <input type="number" className="w-full bg-slate-700 rounded-md px-2 py-1" value={config.totalDuration} onChange={(e) => update('totalDuration', Number(e.target.value))} />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-300">防守时长</label>
-              <input type="number" className="w-full bg-slate-700 rounded-md px-2 py-1" value={config.defenseDuration} onChange={(e) => update('defenseDuration', Number(e.target.value))} />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-300">攻击时长</label>
-              <input className="w-full bg-slate-700 rounded-md px-2 py-1" value={attackDuration} readOnly />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-300">循环次数</label>
-              <input
-                type="number"
-                min={1}
-                className="w-full bg-slate-700 rounded-md px-2 py-1"
-                value={config.repeatCount}
-                onChange={(e) => update('repeatCount', Math.max(1, Number(e.target.value) || 1))}
-              />
-            </div>
-            <div className="md:col-span-2 rounded-md border border-cyan-800/60 bg-cyan-950/30 px-3 py-2 text-sm text-cyan-100">
-              {config.repeatCount > 1
-                ? `当前将连续执行 ${config.repeatCount} 场相同配置的比赛；每一场进入“finish-已清理”后会自动开始下一场。`
-                : '循环次数为 1 时，仅启动单场比赛。'}
+          ) : (
+            <>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <span className="text-sm text-slate-300">模板管理</span>
+                <select
+                  aria-label="模板管理"
+                  className={cx(inputClassName, 'sm:w-72')}
+                  value={selectedTemplate}
+                  onChange={(e) => applyTemplate(e.target.value)}
+                >
+                  <option value="" disabled>选择模板</option>
+                  {templates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name} - {template.playerCount} 选手 / {template.duration} 分钟
+                    </option>
+                  ))}
+                </select>
+                <StatusBadge tone="info">{templates.length ? `${templates.length} 个模板` : '暂无模板'}</StatusBadge>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="secondary" icon={<Save className="h-4 w-4" />} disabled={apiActionsDisabled || isImportingTemplate} onClick={() => setShowSave(true)}>保存为模板</Button>
+                <Button
+                  variant="secondary"
+                  icon={<Upload className="h-4 w-4" />}
+                  loading={isImportingTemplate}
+                  disabled={apiActionsDisabled}
+                  onClick={() => fileRef.current?.click()}
+                >
+                  {isImportingTemplate ? '导入中...' : '导入模板'}
+                </Button>
+                <input ref={fileRef} type="file" accept="application/json" className="hidden" onChange={onImport} />
+              </div>
+            </>
+          )}
+        </div>
+      </Panel>
+
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        <Panel title="基础配置" eyebrow="Arena">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <Field label="赛事名称" className={isWerewolf ? 'md:col-span-2' : undefined}>
+              <input className={inputClassName} value={config.matchName} onChange={(e) => update('matchName', e.target.value)} />
+            </Field>
+            {!isWerewolf && (
+              <>
+                <Field label="总时长（分钟）">
+                  <input type="number" min={1} className={inputClassName} value={config.totalDuration} onChange={(e) => update('totalDuration', Number(e.target.value))} />
+                </Field>
+                <Field label="防御时长（分钟）">
+                  <input type="number" min={0} className={inputClassName} value={config.defenseDuration} onChange={(e) => update('defenseDuration', Number(e.target.value))} />
+                </Field>
+                <Field label="攻击时长（分钟）">
+                  <input className={inputClassName} value={attackDuration} readOnly />
+                </Field>
+                <Field label="循环次数">
+                  <input type="number" min={1} className={inputClassName} value={config.repeatCount} onChange={(e) => update('repeatCount', Math.max(1, Number(e.target.value) || 1))} />
+                </Field>
+              </>
+            )}
+            <div className="rounded-md border border-cyan-500/20 bg-cyan-950/30 p-3 text-sm text-cyan-100 md:col-span-2">
+              {isWerewolf
+                ? '狼人杀第一版固定 12 人局，平台会进行赛前训练、发牌、警长竞选、日夜循环、自爆处理和 AI 裁判评分。'
+                : config.repeatCount > 1
+                ? `当前会连续执行 ${config.repeatCount} 场相同配置的比赛，上一场完成并清理后自动进入下一场。`
+                : '循环次数为 1 时，只启动单场比赛。'}
             </div>
           </div>
-        </div>
-        <div className="bg-slate-800/60 border border-slate-700 rounded-md p-4 space-y-4">
-          <h3 className="text-lg font-semibold">LLM 配置</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm text-slate-300">Provider</label>
-              <select className="w-full bg-slate-700 rounded-md px-2 py-1" value={config.llmProvider} onChange={(e) => update('llmProvider', e.target.value)}>
-                <option>OpenAI</option>
-                <option>Anthropic</option>
-                <option>Custom</option>
+        </Panel>
+
+        <Panel title="LLM 配置" eyebrow="Gateway">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <Field label="LLM 服务商">
+              <select
+                className={inputClassName}
+                value={(() => {
+                  const matched = LLM_PRESETS.find((p) => p.baseUrl === config.llmBaseUrl)
+                  return matched ? matched.id : 'custom'
+                })()}
+                onChange={(e) => {
+                  const preset = LLM_PRESETS.find((p) => p.id === e.target.value)
+                  if (!preset) return
+                  setConfig((current) => ({
+                    ...current,
+                    llmProvider: preset.provider,
+                    llmBaseUrl: preset.baseUrl,
+                    players: preset.defaultModel
+                      ? current.players.map((p, idx) => idx === 0 ? { ...p, model: preset.defaultModel } : p)
+                      : current.players,
+                  }))
+                }}
+              >
+                {LLM_PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
               </select>
-            </div>
-            <div>
-              <label className="block text-sm text-slate-300">Base URL</label>
-              <input className="w-full bg-slate-700 rounded-md px-2 py-1" value={config.llmBaseUrl} onChange={(e) => update('llmBaseUrl', e.target.value)} />
-            </div>
-            <div className="md:col-span-2">
-              <label className="block text-sm text-slate-300">API Key</label>
-              <input type="password" className="w-full bg-slate-700 rounded-md px-2 py-1" value={config.llmApiKey ?? ''} onChange={(e) => update('llmApiKey', e.target.value)} />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-300">代理 URL</label>
-              <input className="w-full bg-slate-700 rounded-md px-2 py-1" value={config.llmProxy ?? ''} onChange={(e) => update('llmProxy', e.target.value)} />
-            </div>
-            <div className="md:col-span-2 flex justify-end">
-              <button 
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-md text-sm text-white disabled:opacity-50"
-                onClick={() => testLlm(config.llmBaseUrl, config.llmApiKey ?? '', config.llmProxy, config.players[0]?.model || 'default-model', true)}
-                disabled={testingGlobalLlm}
+            </Field>
+            <Field label="Base URL">
+              <input className={inputClassName} value={config.llmBaseUrl} onChange={(e) => update('llmBaseUrl', e.target.value)} placeholder="https://api.deepseek.com" />
+            </Field>
+            <Field label="API Key" className="md:col-span-2">
+              <input type="password" className={inputClassName} value={config.llmApiKey ?? ''} onChange={(e) => update('llmApiKey', e.target.value)} />
+            </Field>
+            <Field label="代理 URL">
+              <input className={inputClassName} value={config.llmProxy ?? ''} onChange={(e) => update('llmProxy', e.target.value)} />
+            </Field>
+            <div className="flex flex-col justify-end gap-2">
+              <Button
+                variant="primary"
+                icon={<Zap className="h-4 w-4" />}
+                loading={testingGlobalLlm}
+                disabled={apiActionsDisabled}
+                onClick={() => testLlm(config.llmBaseUrl, config.llmApiKey ?? '', config.llmProxy, config.players[0]?.model || DEFAULT_LLM_MODEL, true)}
               >
                 {testingGlobalLlm ? '测试中...' : '测试全局 API'}
-              </button>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="bg-slate-800/60 border border-slate-700 rounded-md p-4">
-        <h3 className="text-lg font-semibold mb-2">选手配置</h3>
-        <div className="flex items-center gap-2 mb-3 text-sm text-slate-300">
-          <span>选手数:</span>
-          {[2,3,4,5,6,8,10].map((n) => (
-            <button key={n} className={`px-2 py-1 rounded-md ${config.playerCount===n? 'bg-slate-700': 'bg-slate-700/60'}`} onClick={() => update('playerCount', n)}>{n}</button>
-          ))}
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {config.players.map((p, idx) => (
-            <div key={p.id} className="bg-slate-700/40 border border-slate-600 rounded-md p-3 space-y-2">
-              <div className="text-sm font-semibold">{p.name || `Player ${p.id}`}</div>
-              <div>
-                <div className="flex justify-between items-center">
-                  <label className="text-xs text-slate-200">模型</label>
-                  <button 
-                    className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50"
-                    onClick={() => testLlm(config.llmBaseUrl, p.apiKey || config.llmApiKey || '', config.llmProxy, p.model, false, p.id)}
-                    disabled={testingPlayerId === p.id}
-                  >
-                    {testingPlayerId === p.id ? '测试中...' : '测试可用性'}
-                  </button>
-                </div>
-                <input className="w-full bg-slate-600 rounded-md px-2 py-1" value={p.model} onChange={(e) => {
-                  const nm = e.target.value
-                  setConfig((c) => {
-                    const players = c.players.slice()
-                    players[idx] = { ...players[idx], model: nm }
-                    return { ...c, players }
-                  })
-                }} />
-              </div>
-              <div>
-                <label className="text-xs text-slate-200">API Key</label>
-                <input className="w-full bg-slate-600 rounded-md px-2 py-1" value={p.apiKey ?? ''} onChange={(e) => {
-                  const k = e.target.value
-                  setConfig((c) => {
-                    const players = c.players.slice()
-                    players[idx] = { ...players[idx], apiKey: k }
-                    return { ...c, players }
-                  })
-                }} />
-              </div>
-              <div>
-                <label className="text-xs text-slate-200">网关端口</label>
-                <input className="w-full bg-slate-600 rounded-md px-2 py-1" value={p.gatewayPort} readOnly />
-              </div>
-              <div>
-                <label className="text-xs text-slate-200">后端类型</label>
-                <select
-                  className="w-full bg-slate-600 rounded-md px-2 py-1"
-                  value={p.backendType}
-                  onChange={(e) => {
-                    const bt = e.target.value as 'openclaw' | 'hermes'
-                    setConfig((c) => {
-                      const players = c.players.slice()
-                      players[idx] = { ...players[idx], backendType: bt }
-                      return { ...c, players }
-                    })
-                  }}
-                >
-                  <option value="openclaw">OpenClaw</option>
-                  <option value="hermes">Hermes</option>
-                </select>
-              </div>
-              {p.backendType === 'hermes' && (
-                <div className="space-y-2 pl-2 border-l-2 border-amber-600/50">
-                  <div>
-                    <label className="text-xs text-slate-300">镜像 (Hermes专用)</label>
-                    <input
-                      className="w-full bg-slate-600 rounded-md px-2 py-1"
-                      placeholder="hermes-agent:latest"
-                      value={p.backendConfig.image ?? ''}
-                      onChange={(e) => {
-                        setConfig((c) => {
-                          const players = c.players.slice()
-                          players[idx] = {
-                            ...players[idx],
-                            backendConfig: { ...players[idx].backendConfig, image: e.target.value }
-                          }
-                          return { ...c, players }
-                        })
-                      }}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-slate-300">额外环境变量 (JSON)</label>
-                    <input
-                      className="w-full bg-slate-600 rounded-md px-2 py-1"
-                      placeholder='{"KEY": "value"}'
-                      value={JSON.stringify(p.backendConfig.extraEnv ?? {})}
-                      onChange={(e) => {
-                        try {
-                          const parsed = JSON.parse(e.target.value)
-                          setConfig((c) => {
-                            const players = c.players.slice()
-                            players[idx] = {
-                              ...players[idx],
-                              backendConfig: { ...players[idx].backendConfig, extraEnv: parsed }
-                            }
-                            return { ...c, players }
-                          })
-                        } catch {}
-                      }}
-                    />
-                  </div>
-                </div>
+              </Button>
+              {testStatus.global && (
+                <StatusBadge tone={statusTone(testStatus.global.success)}>
+                  {testStatus.global.message}
+                </StatusBadge>
               )}
             </div>
-          ))}
-        </div>
-        <div className="flex space-x-2 mt-3">
-          <button className="px-3 py-2 rounded-md bg-slate-700" onClick={useSameModelAll}>将全部模型设为同一模型</button>
-          <button className="px-3 py-2 rounded-md bg-slate-700" onClick={autoFillNames}>自动生成名称</button>
-        </div>
-      </section>
+          </div>
+        </Panel>
+      </div>
 
-      <section className="bg-slate-800/60 border border-slate-700 rounded-md p-4">
-        <details>
-          <summary className="cursor-pointer text-lg font-semibold">高级配置</summary>
-          <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm text-slate-300">Score weights (attack / defense / SLA)</label>
-              <div className="grid grid-cols-3 gap-2">
-                <input
-                  type="number"
-                  className="bg-slate-700 rounded-md px-2 py-1"
-                  placeholder="attack"
-                  value={config.scoring?.attackSuccess ?? 100}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), attackSuccess: Number(e.target.value) } }))
-                  }
-                />
-                <input
-                  type="number"
-                  className="bg-slate-700 rounded-md px-2 py-1"
-                  placeholder="defense"
-                  value={config.scoring?.defenseFailure ?? -50}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), defenseFailure: Number(e.target.value) } }))
-                  }
-                />
-                <input
-                  type="number"
-                  className="bg-slate-700 rounded-md px-2 py-1"
-                  placeholder="sla"
-                  value={config.scoring?.slaViolation ?? -50}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), slaViolation: Number(e.target.value) } }))
-                  }
-                />
+      <Panel title="选手配置" eyebrow="Players">
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-sm text-slate-300">
+          {!isWerewolf && (
+            <>
+              <span>选手数</span>
+              {[2, 3, 4, 5, 6, 8, 10].map((n) => (
+                <Button key={n} size="sm" variant={config.playerCount === n ? 'primary' : 'secondary'} onClick={() => update('playerCount', n)}>
+                  {n}
+                </Button>
+              ))}
+            </>
+          )}
+          <Button size="sm" variant="secondary" onClick={useSameModelAll}>全部使用 P1 模型</Button>
+        </div>
+
+        {trustedModelOptions.length > 0 && (
+          <div className="mb-4 rounded-md border border-slate-800 bg-slate-950/45 p-3">
+            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs uppercase tracking-wider text-slate-500">模型列表</span>
+                <StatusBadge tone="info">{trustedModelOptions.length} 个候选</StatusBadge>
+                {recentModels.length > 0 && <StatusBadge tone="success">最近 {recentModels.length}</StatusBadge>}
               </div>
+              <label className="flex items-center gap-2 text-xs text-slate-400">
+                应用到
+                <select
+                  className={cx(inputClassName, 'h-8 w-36 py-1 text-xs')}
+                  value={String(modelApplyTarget)}
+                  onChange={(event) => {
+                    const value = event.target.value
+                    setModelApplyTarget(value === 'all' ? 'all' : Number(value))
+                  }}
+                >
+                  <option value="all">全部选手</option>
+                  {config.players.map((player) => (
+                    <option key={player.id} value={player.id}>
+                      P{player.id} {displayModelName(player.model) || player.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
-            <div>
-              <label className="block text-sm text-slate-300">Flag refresh interval (minutes)</label>
-              <input
-                type="number"
-                className="w-full bg-slate-700 rounded-md px-2 py-1"
-                value={config.flagsRefreshInterval ?? 5}
-                onChange={(e) => update('flagsRefreshInterval', Number(e.target.value))}
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-300">Target image</label>
-              <input
-                className="w-full bg-slate-700 rounded-md px-2 py-1"
-                value={config.targetImage ?? ''}
-                onChange={(e) => update('targetImage', e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-300">Agent image (仅用于OpenClaw默认)</label>
-              <div className="text-xs text-slate-400 mt-1">每个选手可在下方单独选择后端类型</div>
-              <input
-                className="w-full bg-slate-700 rounded-md px-2 py-1"
-                value={config.agentImage ?? ''}
-                onChange={(e) => update('agentImage', e.target.value)}
-              />
+            <div className="flex flex-wrap gap-2">
+              {trustedModelOptions.map((model) => (
+                <button
+                  key={model}
+                  type="button"
+                  className={cx(
+                    'cursor-pointer rounded-md border px-2.5 py-1 text-xs transition duration-200 focus:outline-none focus:ring-2 focus:ring-cyan-400/20',
+                    recentModels.includes(model)
+                      ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-100 hover:border-emerald-300/70'
+                      : 'border-slate-700 bg-slate-950/70 text-slate-300 hover:border-cyan-400/60 hover:text-cyan-100',
+                  )}
+                  onClick={() => applyModelFromLibrary(model)}
+                  title={modelApplyTarget === 'all' ? '填入全部选手' : `填入 P${modelApplyTarget}`}
+                >
+                  {model}
+                </button>
+              ))}
             </div>
           </div>
-        </details>
-      </section>
+        )}
 
-      <section className="flex justify-end gap-3">
-        <button className="px-4 py-2 rounded-md bg-slate-600 disabled:opacity-50" disabled={isStarting} onClick={() => {
-          setConfig({
-            matchName: '', totalDuration: 20, defenseDuration: 10, repeatCount: 1, llmProvider: 'OpenAI', llmBaseUrl: '', llmApiKey: '', llmProxy: '', playerCount: 4,
-            players: Array.from({ length: 4 }).map((_, i) => defaultPlayer(i + 1, 18789 + i)),
-            scoring: { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 },
-            flagsRefreshInterval: 5,
-            targetImage: 'openclaw/ctf-target:v1',
-            agentImage: 'alpine/openclaw:latest',
-          } as ConfigState)
-        }}>重置</button>
-        <button className="px-4 py-2 rounded-md bg-cyan-600 text-white disabled:opacity-50" onClick={startMatch} disabled={!canStart || isStarting}>{isStarting ? '创建中...' : config.repeatCount > 1 ? '🚀 开始循环比赛' : '🚀 开始比赛'}</button>
-      </section>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {config.players.map((player, idx) => {
+            const playerStatus = testStatus[player.id]
+            return (
+              <article key={player.id} className="rounded-lg border border-slate-700/80 bg-slate-950/50 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Bot className="h-4 w-4 text-cyan-300" />
+                    <div className="truncate text-sm font-semibold text-slate-100">{player.name || `Player ${player.id}`}</div>
+                  </div>
+                  <StatusBadge tone={player.backendType === 'openclaw' ? 'info' : 'warning'}>{player.backendType}</StatusBadge>
+                </div>
 
-      {startError && <div className="text-red-400 text-sm text-right">创建比赛失败：{startError}</div>}
+                <div className="space-y-3">
+                  <Field label="选手名称">
+                    <input className={inputClassName} value={player.name} onChange={(e) => updatePlayer(idx, { name: e.target.value })} />
+                  </Field>
+                  <Field label="模型">
+                    <div className="flex gap-2">
+                      <input
+                        list="recent-models"
+                        className={inputClassName}
+                        value={player.model}
+                        onFocus={() => setModelApplyTarget(player.id)}
+                        onChange={(e) => updatePlayer(idx, { model: e.target.value })}
+                      />
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        loading={testingPlayerId === player.id}
+                        disabled={apiActionsDisabled}
+                        onClick={() => testLlm(player.baseUrl || config.llmBaseUrl, player.apiKey || config.llmApiKey || '', config.llmProxy, player.model, false, player.id)}
+                      >
+                        {testingPlayerId === player.id ? '测试中' : '测试'}
+                      </Button>
+                    </div>
+                    {playerStatus && <StatusBadge tone={statusTone(playerStatus.success)}>{playerStatus.message}</StatusBadge>}
+                  </Field>
+                  <Field label="Provider/API 类型">
+                    <input
+                      className={inputClassName}
+                      placeholder={config.llmProvider || 'openai-completions'}
+                      value={player.api || player.provider || ''}
+                      onChange={(e) => updatePlayer(idx, { api: e.target.value, provider: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Base URL">
+                    <input
+                      className={inputClassName}
+                      placeholder={config.llmBaseUrl || DEFAULT_LLM_BASE_URL}
+                      value={player.baseUrl ?? ''}
+                      onChange={(e) => updatePlayer(idx, { baseUrl: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="API Key">
+                    <input type="password" className={inputClassName} value={player.apiKey ?? ''} onChange={(e) => updatePlayer(idx, { apiKey: e.target.value })} />
+                  </Field>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="网关端口">
+                      <input className={inputClassName} value={player.gatewayPort} readOnly />
+                    </Field>
+                    <Field label="后端类型">
+                      <select className={inputClassName} value={player.backendType} onChange={(e) => updatePlayer(idx, { backendType: e.target.value as Player['backendType'] })}>
+                        <option value="openclaw">OpenClaw</option>
+                        <option value="hermes">Hermes</option>
+                      </select>
+                    </Field>
+                  </div>
+                  {player.backendType === 'hermes' && (
+                    <div className="space-y-3 border-l-2 border-amber-500/40 pl-3">
+                      <Field label="镜像（Hermes）">
+                        <input
+                          className={inputClassName}
+                          placeholder="hermes-agent:latest"
+                          value={player.backendConfig.image ?? ''}
+                          onChange={(e) => updatePlayer(idx, { backendConfig: { ...player.backendConfig, image: e.target.value } })}
+                        />
+                      </Field>
+                      <Field label="额外环境变量（JSON）">
+                        <input
+                          className={inputClassName}
+                          placeholder='{"KEY":"value"}'
+                          value={JSON.stringify(player.backendConfig.extraEnv ?? {})}
+                          onChange={(e) => {
+                            try {
+                              updatePlayer(idx, { backendConfig: { ...player.backendConfig, extraEnv: JSON.parse(e.target.value) } })
+                            } catch {
+                              return
+                            }
+                          }}
+                        />
+                      </Field>
+                    </div>
+                  )}
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      </Panel>
+
+      <Panel title="高级配置" eyebrow="Runtime">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <Field label={isWerewolf ? '狼人杀评分' : '计分权重（攻击 / 防御 / SLA）'} className="md:col-span-2">
+            {isWerewolf ? (
+              <div className="rounded-md border border-amber-500/20 bg-amber-950/20 p-3 text-sm text-amber-100">
+                失败阵营固定 0 分；胜利阵营每名玩家由 AI 裁判按个人表现给 0-10 分，5 分已经是高分。
+              </div>
+            ) : (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <input type="number" className={inputClassName} value={config.scoring?.attackSuccess ?? 100} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), attackSuccess: Number(e.target.value) } }))} />
+              <input type="number" className={inputClassName} value={config.scoring?.defenseFailure ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), defenseFailure: Number(e.target.value) } }))} />
+              <input type="number" className={inputClassName} value={config.scoring?.slaViolation ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), slaViolation: Number(e.target.value) } }))} />
+            </div>
+            )}
+          </Field>
+          {!isWerewolf && <Field label="Flag 刷新间隔（分钟）">
+            <input type="number" min={1} className={inputClassName} value={config.flagsRefreshInterval ?? 5} onChange={(e) => update('flagsRefreshInterval', Number(e.target.value))} />
+          </Field>}
+          {!isWerewolf && <Field label="Target 镜像">
+            <input className={inputClassName} value={config.targetImage ?? ''} onChange={(e) => update('targetImage', e.target.value)} />
+          </Field>}
+          <Field label="Agent 镜像" hint="OpenClaw 默认使用带 ssh 客户端的本地镜像。">
+            <input className={inputClassName} value={config.agentImage ?? ''} onChange={(e) => update('agentImage', e.target.value)} />
+          </Field>
+        </div>
+      </Panel>
 
       {showSave && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-slate-900 text-slate-100 rounded-md p-6 w-full max-w-md">
-            <h4 className="text-lg font-semibold mb-2">保存为模板</h4>
-            <div className="mb-3">
-              <label className="block text-sm text-slate-300">名称</label>
-              <input className="w-full bg-slate-700 rounded-md px-2 py-1" value={saveName} onChange={(e) => setSaveName(e.target.value)} />
-            </div>
-            <div className="mb-3">
-              <label className="block text-sm text-slate-300">描述</label>
-              <textarea className="w-full bg-slate-700 rounded-md px-2 py-1" value={saveDesc} onChange={(e) => setSaveDesc(e.target.value)} />
-            </div>
-            <div className="flex justify-end gap-2">
-              <button className="px-3 py-2 rounded-md bg-slate-700" onClick={() => setShowSave(false)}>取消</button>
-              <button className="px-3 py-2 rounded-md bg-cyan-600 text-white" onClick={() => {
-                fetchApi(`${API_BASE}/api/templates`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ name: saveName, description: saveDesc, config })
-                }).then(() => setShowSave(false)).catch(() => setShowSave(false))
-              }}>保存</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {isStarting && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-slate-900 text-slate-100 rounded-md border border-slate-700 p-6 w-full max-w-md shadow-2xl">
-            <div className="flex items-center gap-4">
-              <div className="h-10 w-10 rounded-full border-4 border-cyan-500/30 border-t-cyan-400 animate-spin" />
-              <div className="space-y-1">
-                <h4 className="text-lg font-semibold">正在创建比赛</h4>
-                <p className="text-sm text-slate-300">正在创建会话并启动观战页面，请勿重复点击。</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="save-template-title"
+            className="w-full max-w-md rounded-lg border border-slate-700 bg-slate-950 p-5 shadow-2xl"
+          >
+            <h2 id="save-template-title" className="text-lg font-semibold text-white">保存为模板</h2>
+            <div className="mt-4 space-y-3">
+              <Field label="名称">
+                <input className={inputClassName} value={saveName} onChange={(e) => setSaveName(e.target.value)} />
+              </Field>
+              <Field label="描述">
+                <textarea className={cx(inputClassName, 'min-h-[90px]')} value={saveDesc} onChange={(e) => setSaveDesc(e.target.value)} />
+              </Field>
+              <div className="flex justify-end gap-2">
+                <Button variant="secondary" disabled={isSavingTemplate} onClick={() => setShowSave(false)}>取消</Button>
+                <Button
+                  variant="primary"
+                  icon={<FileDown className="h-4 w-4" />}
+                  loading={isSavingTemplate}
+                  onClick={saveTemplate}
+                >
+                  {isSavingTemplate ? '保存中...' : '保存'}
+                </Button>
               </div>
             </div>
           </div>
         </div>
       )}
-      {importError && <div className="text-red-500">Import error: {importError}</div>}
     </div>
   )
 }

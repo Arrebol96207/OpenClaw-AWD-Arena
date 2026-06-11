@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp*/
+tests/
+coverage/
+test-results/
+playwright-report/

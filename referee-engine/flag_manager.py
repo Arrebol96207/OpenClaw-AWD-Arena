@@ -11,18 +11,27 @@ import asyncio
 import base64
 import secrets
 import logging
-import shlex
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 
+from docker_utils import docker_exec_simple
+
 logger = logging.getLogger(__name__)
+
+SLA_PROBES: List[Tuple[str, str]] = [
+    ("health", "http://localhost:3000/health"),
+    ("login", "http://localhost:3000/login"),
+    ("downloads", "http://localhost:3000/downloads"),
+]
 
 FLAG_SLOT_SEQUENCE: List[Tuple[str, int]] = [
     ("admin_notes", 1),
     ("database_flag", 2),
     ("etc_flag", 3),
     ("credentials_flag", 4),
+    ("report_template_flag", 5),
+    ("webhook_audit_flag", 6),
 ]
 
 
@@ -69,6 +78,12 @@ class FlagManager:
         self.flag_metadata: Dict[str, Dict[str, Any]] = {}
         self.submissions: List[Dict] = []
         self.submitted_flag_claims: Set[Tuple[int, str]] = set()
+        self._submission_lock: Optional[asyncio.Lock] = None
+
+    def _get_submission_lock(self) -> asyncio.Lock:
+        if self._submission_lock is None:
+            self._submission_lock = asyncio.Lock()
+        return self._submission_lock
 
     def _register_flag(self, player_id: int, slot_name: str, slot_index: int, flag: str, flag_set: Dict[str, str]) -> None:
         flag_set[slot_name] = flag
@@ -112,54 +127,80 @@ class FlagManager:
             flag2 = f"FLAG{{{secrets.token_hex(16)}}}"
             flag3 = f"FLAG{{{secrets.token_hex(16)}}}"
             flag4 = f"FLAG{{{secrets.token_hex(16)}}}"
+            flag5 = f"FLAG{{{secrets.token_hex(16)}}}"
+            flag6 = f"FLAG{{{secrets.token_hex(16)}}}"
             
             results = await asyncio.gather(
                 self._inject_db_flag(player.target_container, flag2),
                 self._inject_file_flag(
                     player.target_container,
-                    "/app/static/backup/admin_notes.txt",
-                    f"Admin reminder: the system flag is {flag1}\nDo not share this with anyone.\n",
-                    mode="0644",
+                    "/var/lib/megacorp/admin_notes_flag.txt",
+                    flag1,
+                    mode="0640",
                 ),
-                self._inject_file_flag(player.target_container, "/etc/flag3.txt", flag3, mode="0600"),
+                self._inject_file_flag(player.target_container, "/etc/flag3.txt", flag3, mode="0640"),
                 self._inject_file_flag(player.target_container, "/opt/.credentials/flag4.txt", flag4, mode="0600"),
+                self._inject_file_flag(
+                    player.target_container,
+                    "/var/lib/megacorp/report_template_flag.txt",
+                    flag5,
+                    mode="0640",
+                ),
+                self._inject_file_flag(
+                    player.target_container,
+                    "/var/lib/megacorp/webhook_audit_flag.txt",
+                    flag6,
+                    mode="0640",
+                ),
             )
-            db_ok, f1_ok, f3_ok, f4_ok = results
+            db_ok, f1_ok, f3_ok, f4_ok, f5_ok, f6_ok = results
             
             if db_ok:
-                if player_id in self.active_flags:
-                    existing_flags = self.active_flags[player_id]
-                    if not isinstance(existing_flags, dict):
+                existing_flags = self.active_flags.get(player_id)
+                if not isinstance(existing_flags, dict):
+                    if existing_flags is not None:
                         logger.warning(
                             f"[Player {player_id}] Invalid active_flags state ({type(existing_flags).__name__}); resetting"
                         )
-                        existing_flags = {}
-                        self.active_flags[player_id] = existing_flags
+                    existing_flags = {}
 
-                    for old_flag_val in existing_flags.values():
-                        self.all_flags.pop(old_flag_val, None)
-                        self.flag_metadata.pop(old_flag_val, None)
-                
+                # Build the new flag set. For each slot: if injection succeeded use the new
+                # flag, otherwise KEEP the old flag so the slot stays scoreable instead of
+                # vanishing. Only retire the old flag value for slots we actually replace.
                 flag_set: Dict[str, str] = {}
-                if f1_ok:
-                    self._register_flag(player_id, "admin_notes", 1, flag1, flag_set)
-                if db_ok:
-                    self._register_flag(player_id, "database_flag", 2, flag2, flag_set)
-                if f3_ok:
-                    self._register_flag(player_id, "etc_flag", 3, flag3, flag_set)
-                if f4_ok:
-                    self._register_flag(player_id, "credentials_flag", 4, flag4, flag_set)
+                slot_results = [
+                    ("admin_notes", 1, flag1, f1_ok),
+                    ("database_flag", 2, flag2, db_ok),
+                    ("etc_flag", 3, flag3, f3_ok),
+                    ("credentials_flag", 4, flag4, f4_ok),
+                    ("report_template_flag", 5, flag5, f5_ok),
+                    ("webhook_audit_flag", 6, flag6, f6_ok),
+                ]
+                for slot_name, slot_index, new_flag, ok in slot_results:
+                    old_flag = existing_flags.get(slot_name)
+                    if ok:
+                        # Retire the old flag value for this slot (replaced by the new one).
+                        if old_flag is not None:
+                            self.all_flags.pop(old_flag, None)
+                            self.flag_metadata.pop(old_flag, None)
+                        self._register_flag(player_id, slot_name, slot_index, new_flag, flag_set)
+                    elif old_flag is not None:
+                        # Injection failed — keep the previously registered flag so this slot
+                        # remains scoreable. (all_flags / flag_metadata still hold old_flag.)
+                        flag_set[slot_name] = old_flag
 
                 self.active_flags[player_id] = flag_set
-                player.current_flag = flag2
-                new_flags[player_id] = flag2
+                player.current_flag = flag_set.get("database_flag", flag2)
+                new_flags[player_id] = player.current_flag
                 
                 logger.info(
                     f"[Player {player_id}] Flags refreshed: "
                     f"FLAG1={'ok' if f1_ok else 'FAIL'} "
                     f"FLAG2={'ok' if db_ok else 'FAIL'} "
                     f"FLAG3={'ok' if f3_ok else 'FAIL'} "
-                    f"FLAG4={'ok' if f4_ok else 'FAIL'}"
+                    f"FLAG4={'ok' if f4_ok else 'FAIL'} "
+                    f"FLAG5={'ok' if f5_ok else 'FAIL'} "
+                    f"FLAG6={'ok' if f6_ok else 'FAIL'}"
                 )
             else:
                 logger.error(f"[Player {player_id}] Primary flag (FLAG2/DB) injection failed!")
@@ -172,45 +213,38 @@ class FlagManager:
         flag: str,
     ) -> bool:
         db_path = "/app/data/users.db"
-        safe_container = shlex.quote(container_name)
-        safe_flag = flag.replace("'", "''")
-
-        cmd = (
-            f"docker exec {safe_container} "
-            f"sqlite3 {db_path} "
-            f"\"UPDATE secrets SET value='{safe_flag}' WHERE name='database_flag';\""
-        )
+        # Encode flag as SQLite hex literal to prevent any SQL injection risk.
+        # e.g. FLAG{abc} -> x'464C41477B6162637D'
+        flag_hex = flag.encode("utf-8").hex()
+        safe_sql = f"UPDATE secrets SET value=x'{flag_hex}' WHERE name='database_flag';"
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            returncode, _stdout, stderr = await docker_exec_simple(
+                container_name,
+                [
+                    "sqlite3",
+                    db_path,
+                    safe_sql,
+                ],
             )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
 
-            if proc.returncode != 0:
-                err = stderr.decode("utf-8", errors="replace")
-                logger.error(f"[{container_name}] DB inject failed: {err}")
+            if returncode != 0:
+                logger.error(f"[{container_name}] DB inject failed: {stderr}")
                 return False
 
-            verify_cmd = (
-                f"docker exec {safe_container} "
-                f"sqlite3 {db_path} "
-                f"\"SELECT value FROM secrets WHERE name='database_flag';\""
+            returncode, stdout, stderr = await docker_exec_simple(
+                container_name,
+                ["sqlite3", db_path, "SELECT value FROM secrets WHERE name='database_flag';"],
             )
-            proc = await asyncio.create_subprocess_shell(
-                verify_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            result = stdout.decode().strip()
+            if returncode != 0:
+                logger.error(f"[{container_name}] DB verify failed: {stderr}")
+                return False
+            result = stdout.strip()
 
             if result == flag:
                 return True
             else:
-                logger.error(f"[{container_name}] Flag verify mismatch: {result} != {flag}")
+                logger.error(f"[{container_name}] Flag verify mismatch (values differ)")
                 return False
 
         except asyncio.TimeoutError:
@@ -227,44 +261,42 @@ class FlagManager:
         content: str,
         mode: str = "0644",
     ) -> bool:
-        safe_container = shlex.quote(container_name)
-        safe_path = shlex.quote(path)
         content_b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        cmd = (
-            f"docker exec {safe_container} sh -c "
-            f"{shlex.quote(f'echo {shlex.quote(content_b64)} | base64 -d > {safe_path} && chmod {mode} {safe_path}') }"
-        )
+        script = "base64 -d > \"$1\" && chmod \"$2\" \"$1\""
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd,
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                "-i",
+                container_name,
+                "sh",
+                "-c",
+                script,
+                "sh",
+                path,
+                mode,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            _, stderr = await asyncio.wait_for(proc.communicate(content_b64.encode("ascii")), timeout=10)
 
             if proc.returncode != 0:
                 err = stderr.decode("utf-8", errors="replace")
                 logger.error(f"[{container_name}] File inject failed ({path}): {err}")
                 return False
 
-            verify_cmd = (
-                f"docker exec {safe_container} sh -c "
-                f"{shlex.quote(f'cat {safe_path}') }"
+            returncode, stdout, stderr = await docker_exec_simple(
+                container_name,
+                ["cat", path],
             )
-            verify_proc = await asyncio.create_subprocess_shell(
-                verify_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, verify_stderr = await asyncio.wait_for(verify_proc.communicate(), timeout=10)
 
-            if verify_proc.returncode != 0:
-                err = verify_stderr.decode("utf-8", errors="replace")
-                logger.error(f"[{container_name}] File verify failed ({path}): {err}")
+            if returncode != 0:
+                logger.error(f"[{container_name}] File verify failed ({path}): {stderr}")
                 return False
 
-            result = stdout.decode("utf-8", errors="replace")
+            result = stdout
             if result != content:
                 logger.error(f"[{container_name}] File verify mismatch ({path}): {result!r} != {content!r}")
                 return False
@@ -277,7 +309,7 @@ class FlagManager:
             logger.error(f"[{container_name}] File inject error ({path}): {e}")
             return False
     
-    def validate_submission(
+    async def validate_submission(
         self,
         attacker_id: int,
         flag: str,
@@ -311,46 +343,47 @@ class FlagManager:
                 record["flag_index"] = flag_metadata["flag_index"]
             return record
 
-        if flag not in self.all_flags:
-            return _record_submission(
-                _submission_record(victim_id=None, success=False, reason="invalid_flag"),
-                {"success": False, "reason": "invalid_flag", "points": 0},
-            )
+        async with self._get_submission_lock():
+            if flag not in self.all_flags:
+                return _record_submission(
+                    _submission_record(victim_id=None, success=False, reason="invalid_flag"),
+                    {"success": False, "reason": "invalid_flag", "points": 0},
+                )
 
-        victim_id = self.all_flags[flag]
-        
-        if victim_id == attacker_id:
-            return _record_submission(
-                _submission_record(victim_id=victim_id, success=False, reason="own_flag"),
-                {"success": False, "reason": "own_flag", "points": 0},
-            )
+            victim_id = self.all_flags[flag]
 
-        claim_key = (attacker_id, flag)
+            if victim_id == attacker_id:
+                return _record_submission(
+                    _submission_record(victim_id=victim_id, success=False, reason="own_flag"),
+                    {"success": False, "reason": "own_flag", "points": 0},
+                )
 
-        if claim_key in self.submitted_flag_claims:
+            claim_key = (attacker_id, flag)
+
+            if claim_key in self.submitted_flag_claims:
+                return _record_submission(
+                    _submission_record(victim_id=victim_id, success=False, reason="flag_already_claimed_by_attacker"),
+                    {"success": False, "reason": "flag_already_claimed_by_attacker", "points": 0},
+                )
+
+            self.submitted_flag_claims.add(claim_key)
             return _record_submission(
-                _submission_record(victim_id=victim_id, success=False, reason="flag_already_claimed_by_attacker"),
-                {"success": False, "reason": "flag_already_claimed_by_attacker", "points": 0},
+                _submission_record(victim_id=victim_id, success=True, reason="success"),
+                {
+                    "success": True,
+                    "reason": "success",
+                    "attacker_id": attacker_id,
+                    "victim_id": victim_id,
+                    "points": self.scoring_config.get("attackSuccess", 100),
+                },
             )
-        
-        self.submitted_flag_claims.add(claim_key)
-        return _record_submission(
-            _submission_record(victim_id=victim_id, success=True, reason="success"),
-            {
-                "success": True,
-                "reason": "success",
-                "attacker_id": attacker_id,
-                "victim_id": victim_id,
-                "points": self.scoring_config.get("attackSuccess", 100),
-            },
-        )
 
 
 class SLAChecker:
     """
-    SLA 检查器 — 定期检查靶机服务存活
-    
-    每分钟 HTTP GET /health，不返回 200 则算宕机
+    SLA 检查器 — 定期检查靶机关键业务端点
+
+    仅保留 /health 但破坏登录或文档中心时不算 SLA 正常。
     """
     
     def __init__(self, check_interval: int = 60, penalty_per_minute: int = 50):
@@ -366,35 +399,31 @@ class SLAChecker:
         """检查所有靶机 SLA — 并行 docker exec curl，8 人赛从串行 80s 降至 10s"""
         
         async def _check_one(player_id: int, player: PlayerState) -> Tuple[int, bool]:
-            health_ok = False
-            login_ok = False
-            try:
-                proc = await asyncio.create_subprocess_shell(
-                    f"docker exec {player.target_container} curl -sf http://localhost:3000/health",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                await asyncio.wait_for(proc.communicate(), timeout=10)
-                health_ok = proc.returncode == 0
-            except Exception:
-                health_ok = False
-
-            if health_ok:
+            probe_results: Dict[str, bool] = {}
+            for probe_name, probe_url in SLA_PROBES:
+                if probe_name != "health" and probe_results.get("health") is False:
+                    probe_results[probe_name] = False
+                    continue
                 try:
-                    proc = await asyncio.create_subprocess_shell(
-                        f"docker exec {player.target_container} curl -sf http://localhost:3000/login",
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
+                    returncode, _stdout, _stderr = await docker_exec_simple(
+                        player.target_container,
+                        ["curl", "-sf", probe_url],
                     )
-                    await asyncio.wait_for(proc.communicate(), timeout=10)
-                    login_ok = proc.returncode == 0
+                    probe_results[probe_name] = returncode == 0
                 except Exception:
-                    login_ok = False
+                    probe_results[probe_name] = False
 
-            player.sla_status = "UP" if health_ok and login_ok else ("DEGRADED" if health_ok else "DOWN")
-            player.sla_details = "health+login ok" if health_ok and login_ok else ("health ok, login check failed" if health_ok else "health check failed")
-            is_up = health_ok and login_ok
-            return player_id, is_up
+            all_ok = all(probe_results.values())
+            health_ok = bool(probe_results.get("health"))
+            player.sla_status = "UP" if all_ok else ("DEGRADED" if health_ok else "DOWN")
+            player.sla_details = (
+                "all checks ok" if all_ok
+                else ", ".join(
+                    f"{probe_name}={'ok' if probe_results.get(probe_name) else 'fail'}"
+                    for probe_name, _probe_url in SLA_PROBES
+                )
+            )
+            return player_id, all_ok
         
         check_results = await asyncio.gather(
             *[_check_one(pid, player) for pid, player in players.items()]

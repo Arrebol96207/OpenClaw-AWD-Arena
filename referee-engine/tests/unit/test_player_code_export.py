@@ -20,6 +20,10 @@ from flag_manager import PlayerState  # noqa: E402
 import player_code_export  # noqa: E402
 
 
+async def _async_empty_matches():
+    return []
+
+
 def _load_main_module(module_name: str):
     main_path = ROOT / "main.py"
     spec = importlib.util.spec_from_file_location(module_name, main_path)
@@ -95,6 +99,35 @@ class _FakeContainers:
 class _FakeDockerClient:
     def __init__(self, containers):
         self.containers = _FakeContainers(containers)
+
+
+def test_redact_sensitive_bytes_covers_http_auth_and_cookie_headers():
+    payload = (
+        b"Authorization: Basic dXNlcjpzdXBlcnNlY3JldA==\n"
+        b"Authorization: Bearer bearer-secret-token\n"
+        b"Cookie: sessionid=super-secret-cookie; csrftoken=csrf-secret\n"
+        b"Set-Cookie: refresh_token=refresh-secret; HttpOnly; Path=/\n"
+        b"OPENAI_API_KEY=sk-secretvalue123\n"
+        b"FLAG{1234567890abcdef}\n"
+    )
+
+    redacted_bytes, count = player_code_export._redact_sensitive_bytes(payload)
+    redacted = redacted_bytes.decode("utf-8")
+
+    assert count >= 6
+    assert "dXNlcjpzdXBlcnNlY3JldA" not in redacted
+    assert "bearer-secret-token" not in redacted
+    assert "super-secret-cookie" not in redacted
+    assert "csrf-secret" not in redacted
+    assert "refresh-secret" not in redacted
+    assert "sk-secretvalue123" not in redacted
+    assert "FLAG{1234567890abcdef}" not in redacted
+    assert "Authorization: Basic [REDACTED]" in redacted
+    assert "Authorization: Bearer [REDACTED]" in redacted
+    assert "Cookie: [REDACTED]" in redacted
+    assert "Set-Cookie: [REDACTED]" in redacted
+    assert "OPENAI_API_KEY=[REDACTED]" in redacted
+    assert "FLAG{[REDACTED]}" in redacted
 
 
 def test_export_match_player_code_builds_expected_zip(tmp_path, monkeypatch):
@@ -183,6 +216,29 @@ def test_default_export_profile_is_replay(monkeypatch):
     assert player_code_export.is_exportable_code_file("/tmp/test_report.json") is True
 
 
+def test_player_code_export_payload_is_partial_accepts_legacy_shapes():
+    assert player_code_export.player_code_export_payload_is_partial({"partial": True}) is True
+    assert player_code_export.player_code_export_payload_is_partial({"complete": False}) is True
+    assert player_code_export.player_code_export_payload_is_partial({"partial": False, "complete": True}) is False
+    assert player_code_export.player_code_export_payload_is_partial({"status": "ready"}) is False
+    assert player_code_export.player_code_export_payload_is_partial(None) is False
+
+
+def test_safe_player_code_export_dir_stays_inside_exports_root(tmp_path, monkeypatch):
+    exports_root = tmp_path / "exports"
+
+    assert player_code_export.safe_player_code_export_dir("match_safe_export", exports_root=exports_root) == (
+        exports_root / "match_safe_export"
+    )
+
+    with pytest.raises(ValueError, match="Invalid match_id"):
+        player_code_export.safe_player_code_export_dir("../escape", exports_root=exports_root)
+
+    monkeypatch.setattr(player_code_export, "_validate_export_match_id", lambda _match_id: ".")
+    with pytest.raises(ValueError, match="invalid export directory"):
+        player_code_export.safe_player_code_export_dir("match_root_alias", exports_root=exports_root)
+
+
 def test_replay_classification_expands_export_scope(monkeypatch):
     monkeypatch.setenv("OPENCLAW_PLAYER_EXPORT_PROFILE", "replay")
 
@@ -207,6 +263,34 @@ def test_replay_classification_expands_export_scope(monkeypatch):
     )
     assert admin_notes.bucket == "supporting_materials"
     assert admin_notes.requires_redaction is True
+
+    report_template_flag = player_code_export.classify_export_artifact(
+        "/var/lib/megacorp/report_template_flag.txt",
+        "target",
+    )
+    assert report_template_flag.bucket == "supporting_materials"
+    assert report_template_flag.requires_redaction is True
+
+    webhook_audit_flag = player_code_export.classify_export_artifact(
+        "/var/lib/megacorp/webhook_audit_flag.txt",
+        "target",
+    )
+    assert webhook_audit_flag.bucket == "supporting_materials"
+    assert webhook_audit_flag.requires_redaction is True
+
+    queue_job = player_code_export.classify_export_artifact(
+        "/app/reports/.webhook-queue/webhook_queued.json",
+        "target",
+    )
+    assert queue_job.should_export is False
+    assert queue_job.reason == player_code_export.FILTER_REASON_DEFAULT_EXCLUDED_PREFIX
+
+    token_registry = player_code_export.classify_export_artifact(
+        "/var/lib/megacorp/.job_tokens/credential_snapshot.json",
+        "target",
+    )
+    assert token_registry.should_export is False
+    assert token_registry.reason == player_code_export.FILTER_REASON_DEFAULT_EXCLUDED_PREFIX
 
     review_candidate = player_code_export.classify_export_artifact("/tmp/head_app", "target")
     assert review_candidate.should_export is True
@@ -278,6 +362,8 @@ def test_export_match_player_code_replay_includes_target_agent_and_logs(tmp_path
             {"Path": "/app/static/backup/admin_notes.txt", "Kind": 1},
             {"Path": "/etc/flag3.txt", "Kind": 1},
             {"Path": "/opt/.credentials/flag4.txt", "Kind": 1},
+            {"Path": "/var/lib/megacorp/report_template_flag.txt", "Kind": 1},
+            {"Path": "/var/lib/megacorp/webhook_audit_flag.txt", "Kind": 1},
             {"Path": "/tmp/head_app", "Kind": 1},
             {"Path": "/app/Makefile", "Kind": 0},
             {"Path": "/proc/self/stat", "Kind": 1},
@@ -288,6 +374,8 @@ def test_export_match_player_code_replay_includes_target_agent_and_logs(tmp_path
             "/app/static/backup/admin_notes.txt": b"Admin reminder: the system flag is FLAG{28bc79d648ac15e2c913aa722cb38076}\n",
             "/etc/flag3.txt": b"FLAG{4c699ac68e93d18bc8703ee4275498c9}\n",
             "/opt/.credentials/flag4.txt": b"FLAG{28bc79d648ac15e2c913aa722cb38076}\n",
+            "/var/lib/megacorp/report_template_flag.txt": b"FLAG{64af2d01f2f7fb30069b720e956c711d}\n",
+            "/var/lib/megacorp/webhook_audit_flag.txt": b"FLAG{49d19f84abf2d1db34fc09b9d97e332a}\n",
             "/tmp/head_app": b"#!/bin/sh\necho hardened\n",
             "/app/Makefile": b"build:\n\tpython app.py\n",
         },
@@ -364,6 +452,8 @@ def test_export_match_player_code_replay_includes_target_agent_and_logs(tmp_path
         assert "player_1/target/supporting_materials/added/app/static/backup/admin_notes.txt" in names
         assert "player_1/target/supporting_materials/added/etc/flag3.txt" in names
         assert "player_1/target/supporting_materials/added/opt/.credentials/flag4.txt" in names
+        assert "player_1/target/supporting_materials/added/var/lib/megacorp/report_template_flag.txt" in names
+        assert "player_1/target/supporting_materials/added/var/lib/megacorp/webhook_audit_flag.txt" in names
         assert "player_1/target/review_candidates/added/tmp/head_app" in names
         assert "player_1/target/core_code/changed/app/Makefile" in names
         assert "player_1/agent/core_code/added/workspace/attack.py" in names
@@ -386,6 +476,12 @@ def test_export_match_player_code_replay_includes_target_agent_and_logs(tmp_path
         target_flag4_content = archive.read(
             "player_1/target/supporting_materials/added/opt/.credentials/flag4.txt"
         ).decode("utf-8")
+        target_flag5_content = archive.read(
+            "player_1/target/supporting_materials/added/var/lib/megacorp/report_template_flag.txt"
+        ).decode("utf-8")
+        target_flag6_content = archive.read(
+            "player_1/target/supporting_materials/added/var/lib/megacorp/webhook_audit_flag.txt"
+        ).decode("utf-8")
         env_content = archive.read("player_1/agent/core_code/added/workspace/.env").decode("utf-8")
         ssh_run_content = archive.read("player_1/agent/core_code/added/workspace/ssh_run.py").decode("utf-8")
         log_content = archive.read("player_1/logs/agent_session.log").decode("utf-8")
@@ -398,16 +494,20 @@ def test_export_match_player_code_replay_includes_target_agent_and_logs(tmp_path
         assert logs_summary["reason_enums"]["missing"] == list(player_code_export.LOG_MISSING_REASONS)
         assert player_summary["logs"]["available"] is True
         assert target_summary["counts"]["filtered"] == 1
-        assert target_summary["counts"]["redacted"] == 3
+        assert target_summary["counts"]["redacted"] == 5
         assert agent_summary["counts"]["filtered"] == 1
         assert agent_summary["counts"]["skipped_sensitive"] == 2
         assert agent_summary["counts"]["redacted"] == 2
         assert "FLAG{28bc79d648ac15e2c913aa722cb38076}" not in target_admin_notes_content
         assert "FLAG{4c699ac68e93d18bc8703ee4275498c9}" not in target_flag3_content
         assert "FLAG{28bc79d648ac15e2c913aa722cb38076}" not in target_flag4_content
+        assert "FLAG{64af2d01f2f7fb30069b720e956c711d}" not in target_flag5_content
+        assert "FLAG{49d19f84abf2d1db34fc09b9d97e332a}" not in target_flag6_content
         assert "FLAG{[REDACTED]}" in target_admin_notes_content
         assert "FLAG{[REDACTED]}" in target_flag3_content
         assert "FLAG{[REDACTED]}" in target_flag4_content
+        assert "FLAG{[REDACTED]}" in target_flag5_content
+        assert "FLAG{[REDACTED]}" in target_flag6_content
         assert "sk-secret" not in env_content
         assert "hunter2" not in env_content
         assert "[REDACTED]" in env_content
@@ -482,6 +582,13 @@ def test_replay_filters_directory_entries_without_failed_files(tmp_path, monkeyp
         assert target_summary["filtered_paths"] == [
             {"path": "/tmp/tools", "reason": player_code_export.FILTER_REASON_DIRECTORY_PATH}
         ]
+
+
+def test_archive_member_basename_collision_does_not_escape_requested_path():
+    archive_bytes = _make_named_file_archive("../../app.py", b"evil")
+
+    with pytest.raises(FileNotFoundError):
+        player_code_export._extract_file_bytes_from_archive(archive_bytes, "/app/app.py")
 
 
 def test_replay_filters_sensitive_openclaw_root_file(tmp_path, monkeypatch):
@@ -1065,6 +1172,152 @@ async def test_player_code_export_endpoint_surfaces_failed_export_error(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_player_code_export_endpoint_generates_missing_bundle_for_finished_match(tmp_path, monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_player_code_export_generate_module")
+
+    export_path = tmp_path / "match_generate_player_code_export.zip"
+    monkeypatch.setattr(module, "get_player_code_export_path", lambda _match_id: export_path)
+
+    class FakeExportResult:
+        def to_event_payload(self):
+            return {
+                "status": "ready",
+                "bundle_available": True,
+                "bundle_path": str(export_path),
+                "bundle_filename": export_path.name,
+            }
+
+    def fake_export_match_player_code(match):
+        export_path.write_bytes(b"generated-zip")
+        return FakeExportResult()
+
+    saved_events = []
+
+    async def _fake_save_event(match_id, event_type, data, timestamp):
+        saved_events.append((match_id, event_type, data, timestamp))
+
+    monkeypatch.setattr(module, "export_match_player_code", fake_export_match_player_code)
+    monkeypatch.setattr(module.database, "save_event", _fake_save_event)
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1")])
+    match = module.MatchState("match_generate", config)
+    match.status = "finished"
+    module.referee.matches[match.match_id] = match
+
+    response = await module.get_player_code_export(match.match_id)
+
+    assert Path(response.path) == export_path
+    assert response.media_type == "application/zip"
+    assert match.player_code_export["status"] == "ready"
+    assert any(event["type"] == "PLAYER_CODE_EXPORT_READY" for event in match.events)
+    assert saved_events[0][1] == "PLAYER_CODE_EXPORT_READY"
+
+
+@pytest.mark.asyncio
+async def test_player_code_export_endpoint_generates_bundle_for_historical_match(tmp_path, monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_player_code_export_historical_generate_module")
+
+    export_path = tmp_path / "match_historical_player_code_export.zip"
+    match_id = "match_historical_export"
+    monkeypatch.setattr(module, "get_player_code_export_path", lambda _match_id: export_path)
+    module.referee.matches = {}
+
+    class FakeExportResult:
+        def to_event_payload(self):
+            return {
+                "status": "ready",
+                "bundle_available": True,
+                "bundle_path": str(export_path),
+                "bundle_filename": export_path.name,
+                "complete": True,
+                "partial": False,
+            }
+
+    def fake_export_match_player_code(match):
+        assert match.match_id == match_id
+        export_path.write_bytes(b"historical-generated-zip")
+        return FakeExportResult()
+
+    async def _fake_list_matches_summary():
+        return [{"match_id": match_id, "status": "finished"}]
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1")])
+    historical_match = module.MatchState(match_id, config)
+    historical_match.status = "finished"
+
+    async def _fake_load_match_for_report(requested_match_id):
+        assert requested_match_id == match_id
+        return historical_match
+
+    saved_events = []
+
+    async def _fake_save_event(match_id_arg, event_type, data, timestamp):
+        saved_events.append((match_id_arg, event_type, data, timestamp))
+
+    monkeypatch.setattr(module, "export_match_player_code", fake_export_match_player_code)
+    monkeypatch.setattr(module, "load_match_for_report", _fake_load_match_for_report)
+    monkeypatch.setattr(module.database, "list_matches_summary", _fake_list_matches_summary)
+    monkeypatch.setattr(module.database, "save_event", _fake_save_event)
+
+    response = await module.get_player_code_export(match_id)
+
+    assert Path(response.path) == export_path
+    assert response.media_type == "application/zip"
+    assert historical_match.player_code_export["status"] == "ready"
+    assert any(event["type"] == "PLAYER_CODE_EXPORT_READY" for event in historical_match.events)
+    assert saved_events[0][1] == "PLAYER_CODE_EXPORT_READY"
+
+
+@pytest.mark.asyncio
+async def test_player_code_export_endpoint_regenerates_partial_bundle_for_finished_match(tmp_path, monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_player_code_export_regenerate_partial_module")
+
+    export_path = tmp_path / "match_partial_player_code_export.zip"
+    export_path.write_bytes(b"old-partial-zip")
+    monkeypatch.setattr(module, "get_player_code_export_path", lambda _match_id: export_path)
+
+    class FakeExportResult:
+        def to_event_payload(self):
+            return {
+                "status": "ready",
+                "bundle_available": True,
+                "bundle_path": str(export_path),
+                "bundle_filename": export_path.name,
+                "complete": True,
+                "partial": False,
+            }
+
+    def fake_export_match_player_code(match):
+        export_path.write_bytes(b"new-complete-zip")
+        return FakeExportResult()
+
+    saved_events = []
+
+    async def _fake_save_event(match_id, event_type, data, timestamp):
+        saved_events.append((match_id, event_type, data, timestamp))
+
+    monkeypatch.setattr(module, "export_match_player_code", fake_export_match_player_code)
+    monkeypatch.setattr(module.database, "save_event", _fake_save_event)
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1")])
+    match = module.MatchState("match_partial", config)
+    match.status = "finished"
+    match.player_code_export = {"status": "ready", "bundle_available": True, "complete": False, "partial": True}
+    module.referee.matches[match.match_id] = match
+
+    response = await module.get_player_code_export(match.match_id)
+
+    assert Path(response.path) == export_path
+    assert export_path.read_bytes() == b"new-complete-zip"
+    assert match.player_code_export["complete"] is True
+    assert any(event["type"] == "PLAYER_CODE_EXPORT_READY" for event in match.events)
+    assert saved_events[0][1] == "PLAYER_CODE_EXPORT_READY"
+
+
+@pytest.mark.asyncio
 async def test_player_code_export_endpoint_rejects_unfinished_match(tmp_path, monkeypatch):
     monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
     module = _load_main_module("test_main_player_code_export_pending_module")
@@ -1082,3 +1335,61 @@ async def test_player_code_export_endpoint_rejects_unfinished_match(tmp_path, mo
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail == "Match has not finished yet"
+
+
+@pytest.mark.asyncio
+async def test_player_code_export_endpoint_rejects_invalid_match_id(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_player_code_export_invalid_match_id")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await module.get_player_code_export("../openclaw")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Invalid match_id"
+
+
+@pytest.mark.asyncio
+async def test_player_code_export_endpoint_requires_match_record_for_stale_bundle(tmp_path, monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_player_code_export_stale_bundle")
+
+    export_path = tmp_path / "stale.zip"
+    export_path.write_bytes(b"stale-zip")
+    monkeypatch.setattr(module, "get_player_code_export_path", lambda _match_id: export_path)
+    monkeypatch.setattr(module.database, "list_matches_summary", lambda: _async_empty_matches())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await module.get_player_code_export("match_deleted")
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Match not found"
+
+
+@pytest.mark.asyncio
+async def test_delete_match_record_removes_player_code_export_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_delete_export_cleanup")
+
+    export_root = tmp_path / "exports"
+    export_dir = export_root / "match_delete_export"
+    export_dir.mkdir(parents=True)
+    (export_dir / "bundle.zip").write_bytes(b"zip")
+    monkeypatch.setattr(module, "get_exports_root", lambda: export_root)
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1")])
+    match = module.MatchState("match_delete_export", config)
+    match.status = "finished"
+    match.resources_destroyed = True
+    module.referee.matches[match.match_id] = match
+
+    async def _delete_match(match_id: str):
+        assert match_id == "match_delete_export"
+        return 1
+
+    monkeypatch.setattr(module.database, "delete_match", _delete_match)
+
+    response = await module.delete_match_record(match.match_id)
+
+    assert response == {"match_id": match.match_id, "deleted": True}
+    assert not export_dir.exists()

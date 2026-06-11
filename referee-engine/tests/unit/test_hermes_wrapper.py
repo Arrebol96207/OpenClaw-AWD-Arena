@@ -29,14 +29,17 @@ def test_resolve_hermes_cli_prefers_env_override(monkeypatch):
     assert module._resolve_hermes_cli() == "/custom/hermes"
 
 
-def test_resolve_hermes_cli_falls_back_to_virtualenv_binary(monkeypatch):
+def test_resolve_hermes_cli_falls_back_to_virtualenv_binary(monkeypatch, tmp_path):
     module = _load_wrapper_module("test_hermes_wrapper_venv")
+    candidate = tmp_path / ".venv" / "bin" / "hermes"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("", encoding="utf-8")
 
     monkeypatch.delenv("HERMES_CLI", raising=False)
     monkeypatch.setattr(module.shutil, "which", lambda name: None)
-    monkeypatch.setattr(module.Path, "exists", lambda self: str(self) == "/opt/hermes/.venv/bin/hermes")
+    monkeypatch.setattr(module, "HERMES_CLI_CANDIDATES", (candidate,))
 
-    assert module._resolve_hermes_cli() == "/opt/hermes/.venv/bin/hermes"
+    assert module._resolve_hermes_cli() == str(candidate)
 
 
 def test_resolve_hermes_cli_falls_back_to_command_name_when_unavailable(monkeypatch):
@@ -65,14 +68,20 @@ def test_sync_custom_provider_config_writes_custom_model_block(monkeypatch, tmp_
 def test_prepare_subprocess_env_normalizes_proxy_variants(monkeypatch):
     module = _load_wrapper_module("test_hermes_wrapper_proxy")
 
-    monkeypatch.setenv("HTTP_PROXY", "")
-    monkeypatch.setenv("HTTPS_PROXY", "")
-    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:7897")
-    monkeypatch.setenv("http_proxy", "http://127.0.0.1:7897")
-    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7897")
-    monkeypatch.setenv("all_proxy", "http://127.0.0.1:7897")
-    monkeypatch.setenv("NO_PROXY", "")
-    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+    monkeypatch.setattr(
+        module.os,
+        "environ",
+        {
+            "HTTP_PROXY": "",
+            "HTTPS_PROXY": "",
+            "ALL_PROXY": "http://127.0.0.1:7897",
+            "http_proxy": "http://127.0.0.1:7897",
+            "https_proxy": "http://127.0.0.1:7897",
+            "all_proxy": "http://127.0.0.1:7897",
+            "NO_PROXY": "",
+            "no_proxy": "localhost,127.0.0.1",
+        },
+    )
 
     env = module._prepare_subprocess_env()
 

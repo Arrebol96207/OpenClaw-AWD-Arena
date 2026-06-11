@@ -22,6 +22,24 @@ class BackendTargetSSHSpec:
     helper_path: str = "/usr/local/bin/target-ssh"
 
 
+def normalize_provider_api(value: Optional[str]) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return "openai-completions"
+
+    normalized = raw.lower().replace("_", "-").replace(" ", "-")
+    aliases = {
+        "openai": "openai-completions",
+        "custom": "openai-completions",
+        "openai-compatible": "openai-completions",
+        "openai-completion": "openai-completions",
+        "openai-completions": "openai-completions",
+        "anthropic": "anthropic",
+        "claude": "anthropic",
+    }
+    return aliases.get(normalized, raw)
+
+
 class AgentBackendAdapter(Protocol):
     backend_type: str
 

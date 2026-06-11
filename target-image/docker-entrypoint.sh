@@ -18,7 +18,7 @@ if [ ! -f "$ARENA_DB" ]; then
     echo "[AWD Target] Initializing arena database..."
     sqlite3 "$ARENA_DB" < /app/arena/init_arena_db.sql
     chown juice:juice "$ARENA_DB"
-    chmod 644 "$ARENA_DB"
+    chmod 600 "$ARENA_DB"
     echo "[AWD Target] Arena database initialized at $ARENA_DB"
 else
     echo "[AWD Target] Arena database already exists"

@@ -11,9 +11,26 @@ services:
       - OPENCLAW_TEMPLATES_PATH=/app/data/templates.json
       - TZ=Asia/Shanghai
       # 允许跨域（如果有直接访问后端的需要）
-      - CORS_ORIGINS=*
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      - REFEREE_API_KEY=${REFEREE_API_KEY:-}
+      - REFEREE_ALLOW_INSECURE_NO_AUTH=${REFEREE_ALLOW_INSECURE_NO_AUTH:-1}
+      - REFEREE_ALLOW_SHARED_NO_AUTH=${REFEREE_ALLOW_SHARED_NO_AUTH:-0}
+      - FRONTEND_BIND_HOST=${FRONTEND_BIND_HOST:-127.0.0.1}
+      - REFEREE_BIND_HOST=${REFEREE_BIND_HOST:-127.0.0.1}
+      - COMMENTATOR_ENABLED=${COMMENTATOR_ENABLED:-0}
+      - COMMENTATOR_PROVIDER=${COMMENTATOR_PROVIDER:-openai-completions}
+      - COMMENTATOR_MODEL=${COMMENTATOR_MODEL:-}
+      - COMMENTATOR_API_KEY=${COMMENTATOR_API_KEY:-}
+      - COMMENTATOR_BASE_URL=${COMMENTATOR_BASE_URL:-}
+      - COMMENTATOR_INTERVAL_SECONDS=${COMMENTATOR_INTERVAL_SECONDS:-20}
+      - COMMENTATOR_MAX_LOG_CHARS=${COMMENTATOR_MAX_LOG_CHARS:-4000}
+      - WEREWOLF_JUDGE_PROVIDER=${WEREWOLF_JUDGE_PROVIDER:-openai-completions}
+      - WEREWOLF_JUDGE_MODEL=${WEREWOLF_JUDGE_MODEL:-}
+      - WEREWOLF_JUDGE_API_KEY=${WEREWOLF_JUDGE_API_KEY:-}
+      - WEREWOLF_JUDGE_BASE_URL=${WEREWOLF_JUDGE_BASE_URL:-}
+      - WEREWOLF_JUDGE_TIMEOUT_SECONDS=${WEREWOLF_JUDGE_TIMEOUT_SECONDS:-45}
     ports:
-      - "8000:8000"
+      - "${REFEREE_BIND_HOST:-127.0.0.1}:8000:8000"
     restart: unless-stopped
     networks:
       - openclaw_net
@@ -25,7 +42,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
     ports:
-      - "80:80"
+      - "${FRONTEND_BIND_HOST:-127.0.0.1}:8080:80"
     depends_on:
       - referee-engine
     restart: unless-stopped

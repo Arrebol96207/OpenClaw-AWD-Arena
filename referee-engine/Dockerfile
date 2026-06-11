@@ -1,34 +1,30 @@
-FROM python:3.9-slim
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
-# 安装必要的系统依赖
-RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; \
-    apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false update && \
-    apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false install -y --no-install-recommends \
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# 安装必要的系统依赖（含 docker CLI — referee 用 `docker exec/cp` 跟 agent 容器对话）
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     curl \
     openssh-client \
     tzdata \
+    docker-cli \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /install /usr/local
 
 ENV TZ=Asia/Shanghai
 
-# 安装 docker cli
-RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; \
-    ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then \
-        DOCKER_URL="https://download.docker.com/linux/static/stable/x86_64/docker-29.0.1.tgz"; \
-    else \
-        DOCKER_URL="https://download.docker.com/linux/static/stable/aarch64/docker-29.0.1.tgz"; \
-    fi && \
-    curl --noproxy '*' -fsSL $DOCKER_URL | tar xz -C /tmp/ && \
-    mv /tmp/docker/docker /usr/local/bin/ && \
-    rm -rf /tmp/docker
-
-COPY requirements.txt .
-
-RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; \
-    pip install --no-cache-dir -r requirements.txt
+# Cache-bust marker (bump when you need to force COPY rebuild):
+ARG SOURCE_REV=2026-06-11-r1
 
 COPY . .
 

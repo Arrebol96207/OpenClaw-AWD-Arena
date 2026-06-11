@@ -60,7 +60,7 @@ class AgentSession:
     last_keepalive_sent_at: Optional[float] = None
     last_session_activity_signature: Optional[str] = None
     last_code_activity_signature: Optional[str] = None
-    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _send_lock: Optional[asyncio.Lock] = field(default=None, init=False, repr=False)
     in_flight_message_kind: Optional[str] = None
     in_flight_message_mode: Optional[str] = None
     in_flight_started_at: Optional[float] = None
@@ -71,6 +71,12 @@ class AgentSession:
     @property
     def is_busy(self) -> bool:
         return self.send_lock.locked() or self.in_flight_message_kind is not None
+
+    @property
+    def send_lock(self) -> asyncio.Lock:
+        if self._send_lock is None:
+            self._send_lock = asyncio.Lock()
+        return self._send_lock
 
     @property
     def has_buffered_messages(self) -> bool:
@@ -115,6 +121,7 @@ class AgentClient:
     GATEWAY_MODEL_APPLY_TIMEOUT = 90
     GATEWAY_MODEL_POLL_INTERVAL = 2
     INIT_PROMPT_TIMEOUT = 180
+    SUBPROCESS_STREAM_LIMIT = 1024 * 1024
     StreamCallback = Callable[[str], object]
 
     @staticmethod
@@ -122,6 +129,18 @@ class AgentClient:
         normalized = re.sub(r"[*`]+", "", value or "")
         normalized = re.sub(r"\s+", " ", normalized)
         return normalized.strip()
+
+    @staticmethod
+    def _quote_container_path(value: str) -> str:
+        return shlex.quote(str(value or ""))
+
+    @staticmethod
+    def _safe_tail_lines(value: int, *, default: int = 50, maximum: int = 5000) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(parsed, maximum))
     
     def __init__(
         self,
@@ -131,11 +150,13 @@ class AgentClient:
         proxy_url: str = "http://host.docker.internal:7897",
         agent_timeout: int = 600,
         provider_name: str = "routerss",
+        provider_api: str = "openai-completions",
     ):
         self.llm_api_key = llm_api_key
         self.llm_base_url = llm_base_url
         self.llm_model = llm_model
         self.provider_name = provider_name
+        self.provider_api = provider_api
         self.qualified_model = f"{provider_name}/{llm_model}"
         self.proxy_url = proxy_url
         self.agent_timeout = agent_timeout
@@ -272,7 +293,7 @@ class AgentClient:
             candidate_file = f"{self.OPENCLAW_SESSION_DIR}/{session.session_id}.jsonl"
             exists = await self._exec(
                 session.container_name,
-                f"test -f {candidate_file} && printf ok"
+                f"test -f {self._quote_container_path(candidate_file)} && printf ok"
             )
             if exists.strip() == "ok":
                 session_file = candidate_file
@@ -284,7 +305,7 @@ class AgentClient:
         if session_file is None:
             result = await self._exec(
                 session.container_name,
-                f"sh -lc 'ls -t {self.OPENCLAW_SESSION_DIR}/*.jsonl 2>/dev/null | head -1'"
+                f"sh -lc {shlex.quote(f'ls -t {self.OPENCLAW_SESSION_DIR}/*.jsonl 2>/dev/null | head -1')}"
             )
 
             if not result.strip():
@@ -299,15 +320,17 @@ class AgentClient:
         if session_file is None:
             return False
 
+        safe_session_file = self._quote_container_path(session_file)
+        safe_tail_lines = self._safe_tail_lines(tail_lines, default=8)
         snapshot = await self._exec(
             session.container_name,
             (
                 "sh -lc '"
-                f"if [ -f {session_file} ]; then "
-                f"wc -c < {session_file} 2>/dev/null; "
+                f"if [ -f {safe_session_file} ]; then "
+                f"wc -c < {safe_session_file} 2>/dev/null; "
                 "printf "
                 "\"\\n__TAIL__\\n\"; "
-                f"tail -n {tail_lines} {session_file} 2>/dev/null || cat {session_file} 2>/dev/null; "
+                f"tail -n {safe_tail_lines} {safe_session_file} 2>/dev/null || cat {safe_session_file} 2>/dev/null; "
                 "fi'"
             )
         )
@@ -352,117 +375,118 @@ class AgentClient:
         """
         配置 OpenClaw 容器的模型 provider
         
-        使用 docker cp 写入完整配置，然后验证。
+        使用 docker exec stdin 写入完整配置，然后验证，避免 LLM key 落到宿主临时文件。
         关键: "api": "openai-completions" 是必须的，否则请求会失败。
         """
-        bootstrap_wait = await self._wait_for_gateway_bootstrap(container_name)
-        if not bootstrap_wait.success:
-            logger.error(f"[{container_name}] {bootstrap_wait.details}")
-            return bootstrap_wait
+        # Step 1: Ensure config directory exists and write initial model config
+        # (Gateway doesn't read OPENAI_MODEL env var — config file is the only source)
+        await self._exec_as_root(
+            container_name,
+            f"mkdir -p {os.path.dirname(self.OPENCLAW_CONFIG_PATH)} && "
+            f"chown node:node {os.path.dirname(self.OPENCLAW_CONFIG_PATH)}",
+        )
+        initial_config = self._build_model_config({})
+        await self._write_config_to_container(container_name, initial_config)
+        logger.info(f"[{container_name}] Initial model config written before Gateway start")
 
+        # Step 2: Wait for Gateway to start (it writes auth token into the config file)
         config_wait = await self._wait_for_gateway_config(container_name)
         if not config_wait.success:
             logger.error(f"[{container_name}] {config_wait.details}")
             return config_wait
         
+        # Step 3: Read Gateway's config (with auth token), merge model settings, write back
         existing_config_str = await self._exec(
             container_name,
-            f"cat {self.OPENCLAW_CONFIG_PATH}"
+            f"cat {self.OPENCLAW_CONFIG_PATH}",
         )
-        
         try:
             existing_config = json.loads(existing_config_str)
         except json.JSONDecodeError:
-            logger.warning(f"[{container_name}] Could not parse existing config, using empty")
+            logger.warning(f"[{container_name}] Could not parse Gateway config, using empty")
             existing_config = {}
-        
-        gateway_section = existing_config.get("gateway", {})
-        
-        new_config = {
-            **existing_config,
-            "gateway": gateway_section,
-            "agents": {
-                "defaults": {
-                    "model": self.qualified_model
-                }
-            },
-            "models": {
-                "mode": "merge",
-                "providers": {
-                    self.provider_name: {
-                        "apiKey": self.llm_api_key,
-                        "api": "openai-completions",
-                        "models": [
-                            {
-                                "id": self.llm_model,
-                                "name": self.llm_model
-                            }
-                        ]
-                    }
-                }
-            }
-        }
 
-        if self.llm_base_url:
-            new_config["models"]["providers"][self.provider_name]["baseUrl"] = self.llm_base_url
-        
-        config_json = json.dumps(new_config, indent=2)
-        
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            f.write(config_json)
-            tmp_path = f.name
-        
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                f"docker cp {tmp_path} {container_name}:{self.OPENCLAW_CONFIG_PATH}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.CONFIG_COPY_TIMEOUT)
-            if proc.returncode != 0:
-                logger.error(f"[{container_name}] docker cp failed: {stderr.decode()}")
-                return InitResult(False, "CONFIG_COPY_FAILED", stderr.decode("utf-8", errors="replace").strip() or "docker cp failed")
-        finally:
-            os.unlink(tmp_path)
-        
-        # docker cp creates files as root; OpenClaw runs as node
-        await self._exec_as_root(container_name, f"chown node:node {self.OPENCLAW_CONFIG_PATH}")
-        
-        await asyncio.sleep(self.POST_CONFIG_APPLY_DELAY)
-        
-        verify = await self._exec(
-            container_name,
-            f"cat {self.OPENCLAW_CONFIG_PATH}"
-        )
-        
-        if not verify:
-            logger.warning(f"[{container_name}] Verify read returned empty, retrying...")
-            await asyncio.sleep(self.CONFIG_VERIFY_RETRY_DELAY)
-            verify = await self._exec(
-                container_name,
-                f"cat {self.OPENCLAW_CONFIG_PATH}"
-            )
-        
-        if self.qualified_model not in verify or "openai-completions" not in verify:
-            logger.error(f"[{container_name}] Config verification failed. Got: {verify[:300]}")
-            logger.info(f"[{container_name}] Attempting fallback with openclaw config set...")
-            fallback_result = await self._fallback_configure(container_name)
-            if not fallback_result.success:
-                return fallback_result
-        else:
-            logger.info(f"[{container_name}] OpenClaw config file updated: model={self.qualified_model}")
+        merged_config = self._build_model_config(existing_config)
+        await self._write_config_to_container(container_name, merged_config)
+        logger.info(f"[{container_name}] Merged model config written (preserving Gateway auth)")
 
+        # Step 4: Trigger Gateway config reload after writing the merged config.
+        reload_result = await self._restart_gateway_container(container_name)
+        if not reload_result.success:
+            return reload_result
+
+        # Step 5: Verify the Gateway is now using the correct model
         live_model, live_details = await self._wait_gateway_model_applied(container_name)
-        if live_model != self.qualified_model:
+        expected_model = self._normalize_gateway_model_value(self.qualified_model or self.llm_model)
+        observed_model = self._normalize_gateway_model_value(live_model or "")
+        expected_model_id = expected_model.split("/", 1)[-1] if expected_model else self.llm_model
+        live_model_id = observed_model.split("/", 1)[-1] if observed_model else None
+        if not live_model_id or live_model_id != expected_model_id:
             details = (
                 f"expected live model {self.qualified_model}, observed {live_model or 'unknown'}"
                 f"; recent gateway logs: {live_details}"
             )
             logger.error(f"[{container_name}] {details}")
             return InitResult(False, "GATEWAY_RELOAD_TIMEOUT", details)
+        if observed_model != expected_model:
+            logger.warning(
+                f"[{container_name}] gateway re-classified provider: expected {self.qualified_model}, "
+                f"got {live_model}; accepting since model id matches"
+            )
 
         logger.info(f"[{container_name}] OpenClaw configured and active: model={live_model}")
+        return InitResult(True)
+
+    def _build_model_config(self, existing_config: dict) -> dict:
+        """Build config dict merging existing config with model provider settings."""
+        config = dict(existing_config)
+        config["agents"] = {"defaults": {"model": self.qualified_model}}
+        provider_entry: dict = {
+            "apiKey": self.llm_api_key,
+            "api": self.provider_api,
+            "models": [{"id": self.llm_model, "name": self.llm_model}],
+        }
+        if self.llm_base_url:
+            provider_entry["baseUrl"] = self.llm_base_url
+        config["models"] = {
+            "mode": "merge",
+            "providers": {self.provider_name: provider_entry},
+        }
+        return config
+
+    async def _write_config_to_container(self, container_name: str, config: dict) -> None:
+        """Write openclaw.json through stdin so provider keys never touch host temp files."""
+        config_json = json.dumps(config, indent=2)
+        quoted_path = shlex.quote(self.OPENCLAW_CONFIG_PATH)
+        quoted_dir = shlex.quote(os.path.dirname(self.OPENCLAW_CONFIG_PATH))
+        command = (
+            f"umask 077 && mkdir -p {quoted_dir} && "
+            f"cat > {quoted_path} && chown node:node {quoted_path}"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            "exec",
+            "-u",
+            "root",
+            "-i",
+            container_name,
+            "sh",
+            "-lc",
+            command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await asyncio.wait_for(
+            proc.communicate(config_json.encode("utf-8")),
+            timeout=self.CONFIG_COPY_TIMEOUT,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"docker exec config write failed: {stderr.decode(errors='replace')}")
+
+    async def _reload_gateway_config(self, container_name: str) -> InitResult:
+        """Send SIGUSR1 to the Gateway process to trigger config hot-reload."""
+        return await self._restart_gateway_container(container_name)
         return InitResult(True)
 
     async def _config_file_exists(self, container_name: str) -> bool:
@@ -535,43 +559,22 @@ class AgentClient:
             "providers": {
                 self.provider_name: {
                     "apiKey": self.llm_api_key,
-                    "api": "openai-completions",
+                    "api": self.provider_api,
                     "models": [{"id": self.llm_model, "name": self.llm_model}]
                 }
             }
         }
         if self.llm_base_url:
             config_payload["providers"][self.provider_name]["baseUrl"] = self.llm_base_url
-        config_json = json.dumps(config_payload)
-        
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            f.write(config_json)
-            tmp_path = f.name
-        
+        existing = await self._exec(container_name, f"cat {self.OPENCLAW_CONFIG_PATH}")
         try:
-            existing = await self._exec(container_name, f"cat {self.OPENCLAW_CONFIG_PATH}")
-            try:
-                cfg = json.loads(existing)
-            except json.JSONDecodeError:
-                cfg = {}
-            
-            cfg["agents"] = {"defaults": {"model": self.qualified_model}}
-            cfg["models"] = json.loads(config_json)
-            
-            with open(tmp_path, 'w') as f:
-                json.dump(cfg, f, indent=2)
-            
-            proc = await asyncio.create_subprocess_shell(
-                f"docker cp {tmp_path} {container_name}:{self.OPENCLAW_CONFIG_PATH}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await asyncio.wait_for(proc.communicate(), timeout=self.CONFIG_COPY_TIMEOUT)
-        finally:
-            os.unlink(tmp_path)
-        
-        await self._exec_as_root(container_name, f"chown node:node {self.OPENCLAW_CONFIG_PATH}")
+            cfg = json.loads(existing)
+        except json.JSONDecodeError:
+            cfg = {}
+
+        cfg["agents"] = {"defaults": {"model": self.qualified_model}}
+        cfg["models"] = config_payload
+        await self._write_config_to_container(container_name, cfg)
         await asyncio.sleep(self.POST_CONFIG_APPLY_DELAY)
         
         verify = await self._exec(container_name, f"cat {self.OPENCLAW_CONFIG_PATH}")
@@ -588,87 +591,71 @@ class AgentClient:
             f"Config file did not contain expected provider/model after fallback: {verify[:200]}"
         )
 
+    @staticmethod
+    def _normalize_gateway_model_value(value: str) -> str:
+        normalized = (value or "").strip()
+        if not normalized:
+            return ""
+        normalized = normalized.split(" (", 1)[0].strip()
+        return normalized.strip("'\"")
+
+    async def _restart_gateway_container(self, container_name: str) -> InitResult:
+        # OpenClaw's gateway process reloads configuration on SIGUSR1. Keep this
+        # as an in-container argv call so container names never pass through the
+        # host shell.
+        command = (
+            "if command -v pkill >/dev/null 2>&1; then "
+            "pkill -USR1 -f 'openclaw' >/dev/null 2>&1 || true; "
+            "else "
+            "pid=$(ps -eo pid=,comm=,args= | awk '/openclaw/ && !/awk/ {print $1; exit}'); "
+            "[ -n \"$pid\" ] && kill -USR1 \"$pid\" || true; "
+            "fi"
+        )
+        await self._exec_as_root(container_name, command, timeout=10)
+        await asyncio.sleep(self.POST_CONFIG_APPLY_DELAY)
+        return InitResult(True)
+
     async def _read_live_gateway_model(self, container_name: str) -> Optional[str]:
-        script = """
-import json
-from pathlib import Path
-
-last_model = ''
-for path in sorted(Path('/tmp/openclaw').glob('openclaw-*.log')):
-    try:
-        for raw in path.read_text(errors='replace').splitlines():
-            if not raw.strip():
-                continue
-            try:
-                payload = json.loads(raw)
-            except Exception:
-                continue
-            message = payload.get('1')
-            if isinstance(message, str) and message.startswith('agent model: '):
-                last_model = message.split('agent model: ', 1)[1].strip()
-    except Exception:
-        continue
-
-if last_model:
-    print(last_model)
-"""
-        command = shlex.quote(f"python3 - <<'PY'\n{script}\nPY")
+        # The agent container is node-based (no python3). Grep raw JSONL lines for the model
+        # marker; referee parses the JSON on its side to extract the model id.
+        cmd = "grep -h 'agent model: ' /tmp/openclaw/openclaw-*.log 2>/dev/null | tail -n 1"
         result = await self._exec(
             container_name,
-            f"sh -lc {command}",
+            f"sh -c {shlex.quote(cmd)}",
             timeout=self.GATEWAY_STATE_READ_TIMEOUT,
         )
-        value = result.strip()
-        return value or None
+        line = (result or "").strip()
+        if not line:
+            return None
+        # The log line is a JSON object with a "message" field like
+        # "agent model: openai/gpt-5.5 (thinking=medium, fast=off)".
+        try:
+            payload = json.loads(line)
+            msg = payload.get("message") or payload.get("1") or ""
+        except Exception:
+            msg = line
+        if "agent model: " in msg:
+            value = self._normalize_gateway_model_value(msg.split("agent model: ", 1)[1])
+            return value or None
+        return None
 
     async def _read_recent_gateway_events(self, container_name: str) -> str:
-        script = """
-import json
-from pathlib import Path
-
-events = []
-keywords = (
-    'config change',
-    'SIGUSR1',
-    'agent model:',
-    'listening on ws://',
-    'Browser control listening',
-    'Generated a new token',
-)
-
-for path in sorted(Path('/tmp/openclaw').glob('openclaw-*.log')):
-    try:
-        for raw in path.read_text(errors='replace').splitlines():
-            if not raw.strip():
-                continue
-            try:
-                payload = json.loads(raw)
-            except Exception:
-                continue
-            parts = []
-            for key in ('1', '2'):
-                value = payload.get(key)
-                if isinstance(value, str) and value.strip():
-                    parts.append(value.strip())
-
-            message = ' '.join(parts)
-            if message and any(keyword in message for keyword in keywords):
-                ts = payload.get('time', '')
-                events.append(f"{ts} {message}".strip())
-    except Exception:
-        continue
-
-for item in events[-10:]:
-    print(item)
-"""
-        command = shlex.quote(f"python3 - <<'PY'\n{script}\nPY")
+        # No python3 in agent container; grep raw JSONL lines for any of the startup keywords
+        # we care about. Return last 40 matching lines joined.
+        # Keywords intentionally include both old ("agent model:") and current ("gateway ready",
+        # "http server listening") markers so we tolerate runtime version changes.
+        pattern = (
+            "config change|SIGUSR1|agent model:|listening on ws://|"
+            "Browser control listening|Generated a new token|gateway ready|http server listening"
+        )
+        cmd = f"grep -hE {shlex.quote(pattern)} /tmp/openclaw/openclaw-*.log 2>/dev/null | tail -n 40"
         result = await self._exec(
             container_name,
-            f"sh -lc {command}",
+            f"sh -c {shlex.quote(cmd)}",
             timeout=self.GATEWAY_STATE_READ_TIMEOUT,
         )
-        compact = " | ".join(line.strip() for line in result.splitlines() if line.strip())
-        return compact[:800]
+        return (result or "").strip()
+
 
     async def _wait_gateway_model_applied(
         self,
@@ -685,7 +672,10 @@ for item in events[-10:]:
         while asyncio.get_running_loop().time() < deadline:
             last_model = await self._read_live_gateway_model(container_name)
             last_details = await self._read_recent_gateway_events(container_name)
-            if last_model == self.qualified_model:
+            if (
+                self._normalize_gateway_model_value(last_model or "")
+                == self._normalize_gateway_model_value(self.qualified_model)
+            ):
                 return last_model, last_details
             await asyncio.sleep(self.GATEWAY_MODEL_POLL_INTERVAL)
 
@@ -969,7 +959,36 @@ for item in events[-10:]:
                 if result:
                     try:
                         resp = json.loads(result)
-                        content = resp.get("content", resp.get("text", resp.get("message", result)))
+                        # The openclaw agent --json output may be either:
+                        #   (a) simple {"content": "..."} for older runtimes
+                        #   (b) the trace-schema dump nesting model text under
+                        #       data.assistantTexts[0] / finalAssistantVisibleText
+                        # Probe several paths so model output is extracted instead of falling
+                        # back to the whole stdout (which makes parse_agent_action treat every
+                        # action as `pass` because the outer wrapper has no "action" field).
+                        content: Optional[str] = None
+                        if isinstance(resp, dict):
+                            for key in ("content", "text", "message"):
+                                v = resp.get(key)
+                                if isinstance(v, str) and v.strip():
+                                    content = v
+                                    break
+                            if content is None:
+                                data_section = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+                                texts = data_section.get("assistantTexts") if isinstance(data_section, dict) else None
+                                if isinstance(texts, list):
+                                    for t in texts:
+                                        if isinstance(t, str) and t.strip():
+                                            content = t
+                                            break
+                            if content is None:
+                                for key in ("finalAssistantVisibleText", "finalAssistantRawText"):
+                                    v = resp.get(key)
+                                    if isinstance(v, str) and v.strip():
+                                        content = v
+                                        break
+                        if content is None:
+                            content = result
                         session.last_response = str(content)
                         self._mark_session_activity(session)
                         meta = resp.get("meta") if isinstance(resp, dict) else None
@@ -1014,9 +1033,10 @@ for item in events[-10:]:
         return response_text
 
     def build_agent_exec_command(self, session: AgentSession, message_b64: str, timeout: int) -> str:
+        safe_timeout = max(1, int(timeout))
         return (
-            f"sh -c 'echo {message_b64} | base64 -d | "
-            f"openclaw agent --agent main -m \"$(cat)\" --json --timeout {timeout}'"
+            f"sh -c 'printf %s {shlex.quote(message_b64)} | base64 -d | "
+            f"openclaw agent --agent main -m \"$(cat)\" --json --timeout {safe_timeout}'"
         )
     
     async def send_heartbeat(
@@ -1057,7 +1077,7 @@ for item in events[-10:]:
 
         log_content = await self._exec(
             session.container_name,
-            f"cat {session_file}"
+            f"cat {self._quote_container_path(session_file)}"
         )
         
         return log_content if log_content.strip() else None
@@ -1067,10 +1087,12 @@ for item in events[-10:]:
         session_file = await self._resolve_session_file(session)
         if session_file is None:
             return False
-        
+
+        safe_session_file = self._quote_container_path(session_file)
+        safe_tail_lines = self._safe_tail_lines(tail_lines)
         tail_content = await self._exec(
             session.container_name,
-            f"tail -n {tail_lines} {session_file} 2>/dev/null || cat {session_file} 2>/dev/null"
+            f"tail -n {safe_tail_lines} {safe_session_file} 2>/dev/null || cat {safe_session_file} 2>/dev/null"
         )
 
         if not tail_content:
@@ -1086,7 +1108,7 @@ for item in events[-10:]:
 
         full_content = await self._exec(
             session.container_name,
-            f"cat {session_file} 2>/dev/null"
+            f"cat {safe_session_file} 2>/dev/null"
         )
         if not full_content:
             return False
@@ -1107,7 +1129,6 @@ for item in events[-10:]:
         message_kind: Optional[str] = None,
         message_mode: Optional[str] = None,
     ) -> str:
-        full_cmd = f"docker exec {container_name} {command}"
         proc: Optional[asyncio.subprocess.Process] = None
         started_at = time.monotonic()
         partial_stdout = ""
@@ -1139,10 +1160,16 @@ for item in events[-10:]:
                     pass
         
         try:
-            proc = await asyncio.create_subprocess_shell(
-                full_cmd,
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                container_name,
+                "sh",
+                "-lc",
+                command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=self.SUBPROCESS_STREAM_LIMIT,
             )
             if proc.stdout is None or proc.stderr is None:
                 logger.error(f"[{container_name}] Missing subprocess pipes for command: {command[:80]}")
@@ -1245,12 +1272,19 @@ for item in events[-10:]:
         command: str,
         timeout: int = 30,
     ) -> str:
-        full_cmd = f"docker exec -u root {container_name} {command}"
         try:
-            proc = await asyncio.create_subprocess_shell(
-                full_cmd,
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                "-u",
+                "root",
+                container_name,
+                "sh",
+                "-lc",
+                command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=self.SUBPROCESS_STREAM_LIMIT,
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
@@ -1311,6 +1345,9 @@ class PromptRenderer:
         player_id: int,
         enemy_targets: List[Dict[str, Any]],
         target_port: int,
+        own_target_ip: str,
+        maintenance_auth_mode: str,
+        maintenance_helper_command: str,
         referee_api_url: str,
         player_status_url: str,
         player_read_token: str,
@@ -1326,12 +1363,34 @@ class PromptRenderer:
         if not enemy_list:
             enemy_list = "- No enemies found"
 
+        submission_examples = "\n".join(
+            (
+                f"curl -s -X POST {referee_api_url}/api/submit "
+                f"-H {shlex.quote(f'X-Player-Token: {player_read_token}')} "
+                f"-H 'Content-Type: application/json' "
+                f"-d {shlex.quote(json.dumps({'flag': 'FLAG{{captured_flag}}', 'target_player_id': t.get('player_id', i + 1)}, ensure_ascii=False))}"
+            )
+            for i, t in enumerate(enemy_targets)
+        )
+        if not submission_examples:
+            submission_examples = (
+                f"curl -s -X POST {referee_api_url}/api/submit "
+                f"-H {shlex.quote(f'X-Player-Token: {player_read_token}')} "
+                f"-H 'Content-Type: application/json' "
+                "-d '{\"flag\":\"FLAG{captured_flag}\",\"target_player_id\":<target_player_id>}'"
+            )
+
         return cls._load("attack_start").format(
             PLAYER_ID=player_id,
+            OWN_TARGET_IP=own_target_ip,
+            TARGET_PORT=target_port,
+            MAINTENANCE_AUTH_MODE=maintenance_auth_mode,
+            MAINTENANCE_HELPER_COMMAND=maintenance_helper_command,
             ENEMY_TARGET_LIST=enemy_list,
             REFEREE_API_URL=referee_api_url,
             PLAYER_STATUS_URL=player_status_url,
             PLAYER_READ_TOKEN=player_read_token,
+            SUBMISSION_EXAMPLES=submission_examples,
             ATTACK_SCORE=scoring.get("attackSuccess", 100),
             DEFENSE_SCORE=scoring.get("defenseFailure", -50),
             SLA_SCORE=scoring.get("slaViolation", -50),

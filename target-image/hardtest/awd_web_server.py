@@ -31,7 +31,10 @@ class AWDHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
         else:
-            super().do_GET()
+            self.send_response(404)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>")
 
     def log_message(self, format, *args):
         pass  # Suppress access logs

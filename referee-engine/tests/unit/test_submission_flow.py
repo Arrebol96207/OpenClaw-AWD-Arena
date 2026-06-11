@@ -1,5 +1,7 @@
 import asyncio
 import importlib.util
+import json
+import logging
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -76,12 +78,92 @@ def _minimal_config_dict():
         "flags": {"refreshInterval": 300, "format": "flag{{{hash}}}"},
         "network": {"arenaSubnet": "172.20.0.0/16", "mgmtSubnetPrefix": "172.21"},
         "target_image": "openclaw/ctf-target:v1",
-        "agent_image": "alpine/openclaw:latest",
+        "agent_image": "openclaw/local-agent:ssh",
     }
 
 
 async def _async_noop():
     return None
+
+
+async def _async_save_event_noop(*args, **kwargs):
+    return None
+
+
+@pytest.mark.asyncio
+async def test_add_event_background_persistence_failure_is_logged(monkeypatch, caplog):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_add_event_background_failure")
+
+    async def _failing_save_event(*args, **kwargs):
+        raise RuntimeError("db writer down")
+
+    monkeypatch.setattr(module.database, "save_event", _failing_save_event)
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1")])
+    match = module.MatchState("match_background_event_failure", config)
+
+    with caplog.at_level(logging.WARNING, logger=module.logger.name):
+        event = match.add_event("TEST_EVENT", {"secret": "value"})
+        await asyncio.sleep(0)
+
+    assert event["type"] == "TEST_EVENT"
+    assert match.events[-1]["type"] == "TEST_EVENT"
+    assert "background event persistence failed for TEST_EVENT" in caplog.text
+    assert "db writer down" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_end_match_waits_for_background_task_cancellation(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_end_match_waits_cancel")
+
+    monkeypatch.setattr(module.database, "update_match_status", _async_save_event_noop)
+    monkeypatch.setattr(module.database, "save_event", _async_save_event_noop)
+    monkeypatch.setattr(module.referee, "broadcast", _async_save_event_noop)
+
+    class FakeExportResult:
+        def to_event_payload(self):
+            return {"status": "ready", "complete": True}
+
+    monkeypatch.setattr(module, "export_match_player_code", lambda _match: FakeExportResult())
+    monkeypatch.setattr(module.referee, "destroy_match", _async_save_event_noop)
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1")])
+    match = module.MatchState("match_end_waits_cancel", config)
+    match.status = "defense"
+    match.started_at = datetime.now()
+    match.players[1] = PlayerState(player_id=1, container_name="c1", target_container="t1", target_ip="10.0.0.1")
+    module.referee.matches[match.match_id] = match
+
+    flag_task_cancelled = asyncio.Event()
+
+    async def _flag_task():
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            flag_task_cancelled.set()
+            raise
+
+    match._flag_task = asyncio.create_task(_flag_task())
+    await asyncio.sleep(0)
+
+    await module.referee.end_match(match.match_id)
+
+    assert flag_task_cancelled.is_set()
+    assert match._flag_task.done() is True
+    assert match.status == "finished"
+
+
+def _assert_success_feedback(feedback):
+    assert feedback["status_query_recommended"] is True
+    assert feedback["player_status_endpoint"] == "/api/player/status"
+    assert feedback["required_header"] == "X-Player-Token"
+    assert "GET /api/player/status" in feedback["status_query_hint"]
+    assert "You gained 100 points." in feedback["summary"]
+    assert "Flag submission succeeded" in feedback["summary"]
+
+
 
 
 async def _async_empty_matches():
@@ -120,7 +202,10 @@ async def test_save_and_load_submissions_round_trip(tmp_path, monkeypatch):
 
     loaded = await database.load_submissions("match_roundtrip")
 
-    assert loaded == [first, second]
+    assert loaded == [
+        {**first, "flag": "********"},
+        {**second, "flag": "********"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -161,8 +246,11 @@ async def test_load_submissions_is_isolated_by_match_and_time_order(tmp_path, mo
     beta = await database.load_submissions("match_beta")
     missing = await database.load_submissions("match_missing")
 
-    assert alpha == [early, late]
-    assert beta == [other_match]
+    assert alpha == [
+        {**early, "flag": "********"},
+        {**late, "flag": "********"},
+    ]
+    assert beta == [{**other_match, "flag": "********"}]
     assert missing == []
 
 
@@ -188,7 +276,7 @@ def test_get_match_status_excludes_submission_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_submissions_endpoint_returns_persisted_records_only(monkeypatch):
+async def test_submissions_endpoint_returns_persisted_records_only_with_redacted_flags(monkeypatch):
     monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
     module = _load_main_module("test_main_submissions_module")
 
@@ -206,7 +294,134 @@ async def test_submissions_endpoint_returns_persisted_records_only(monkeypatch):
 
     response = await module.get_submissions(match.match_id)
 
-    assert response == {"match_id": match.match_id, "submissions": persisted}
+    assert match.persisted_submissions == persisted
+    assert response["match_id"] == match.match_id
+    assert [item["flag"] for item in response["submissions"]] == ["********", "********"]
+    assert "FLAG{1-2}" not in json.dumps(response)
+    assert "FLAG{2-1}" not in json.dumps(response)
+
+
+def test_match_report_markdown_summarizes_public_replay_data(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_match_report_markdown")
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="Alpha"), module.PlayerConfig(id=2, name="Beta")])
+    match = module.MatchState("match_report", config)
+    match.status = "finished"
+    match.resources_destroyed = True
+    match.players[1] = PlayerState(player_id=1, container_name="c1", target_container="t1", target_ip="10.0.0.1")
+    match.players[2] = PlayerState(player_id=2, container_name="c2", target_container="t2", target_ip="10.0.0.2")
+    match.persisted_submissions = [
+        _build_submission(attacker_id=1, victim_id=2, success=True, timestamp="2026-03-27T10:00:00", points=100)
+    ]
+    match.events = [
+        {
+            "type": "FLAG_SUBMISSION_ACCEPTED",
+            "data": {
+                "attacker_id": 1,
+                "victim_id": 2,
+                "flag": "FLAG{super-secret}",
+                "reason": "success",
+                "token": "secret-token",
+            },
+            "timestamp": "2026-03-27T10:00:00",
+            "match_id": match.match_id,
+        }
+    ]
+    leaderboard = {
+        1: {"player_id": 1, "name": "Alpha", "total_score": 100, "flags_captured": 1, "flags_lost": 0, "sla_up": True},
+        2: {"player_id": 2, "name": "Beta", "total_score": -50, "flags_captured": 0, "flags_lost": 1, "sla_up": False},
+    }
+
+    report = module.build_match_report_markdown(match, leaderboard)
+
+    assert "# Match Report: AWD Match" in report
+    assert "| 1 | Alpha | 100 | 1 | 0 | up |" in report
+    assert "- Attempts: 1" in report
+    assert "- Successful Captures: 1" in report
+    assert "FLAG{super-secret}" not in report
+    assert "secret-token" not in report
+    assert module._markdown_cell("token=secret-token") == "token=********"
+
+
+@pytest.mark.asyncio
+async def test_match_report_markdown_endpoint_returns_download(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_match_report_endpoint")
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1")])
+    match = module.MatchState("match_report_endpoint", config)
+    match.players[1] = PlayerState(player_id=1, container_name="c1", target_container="t1", target_ip="10.0.0.1")
+    module.referee.matches[match.match_id] = match
+
+    response = await module.get_match_report_markdown(match.match_id)
+
+    assert response.media_type == "text/markdown"
+    assert "match_match_report_endpoint_report.md" in response.headers["Content-Disposition"]
+    assert b"# Match Report:" in response.body
+
+
+@pytest.mark.asyncio
+async def test_match_report_markdown_endpoint_recovers_historical_match(tmp_path, monkeypatch):
+    db_path = tmp_path / "historical-report.db"
+    monkeypatch.setattr(database, "DB_PATH", str(db_path))
+
+    await database.init_db()
+
+    created_at = datetime(2026, 3, 27, 10, 0, 0)
+    finished_at = datetime(2026, 3, 27, 10, 30, 0)
+    match_id = "match_historical_report"
+    leaderboard = {
+        "1": {
+            "player_id": 1,
+            "name": "Recovered Alpha",
+            "total_score": 100,
+            "flags_captured": 1,
+            "flags_lost": 0,
+            "sla_up": True,
+        },
+        "2": {
+            "player_id": 2,
+            "name": "Recovered Beta",
+            "total_score": -50,
+            "flags_captured": 0,
+            "flags_lost": 1,
+            "sla_up": False,
+        },
+    }
+    saved_submission = _build_submission(
+        attacker_id=1,
+        victim_id=2,
+        success=True,
+        timestamp="2026-03-27T10:10:00",
+        points=100,
+    )
+
+    await database.save_match(match_id, "finished", _minimal_config_dict(), created_at)
+    await database.update_match_status(match_id, "finished", finished_at)
+    await database.save_submission(match_id, saved_submission)
+    await database.save_event(match_id, "MATCH_FINISHED", {"leaderboard": leaderboard}, finished_at)
+    await database.save_event(
+        match_id,
+        "MATCH_RESOURCES_DESTROYED",
+        {"containers_removed": 4, "networks_removed": 3, "status": "finished"},
+        finished_at + timedelta(minutes=1),
+    )
+
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_historical_report_endpoint")
+    module.referee.matches = {}
+
+    response = await module.get_match_report_markdown(match_id)
+
+    report = response.body.decode("utf-8")
+    assert response.media_type == "text/markdown"
+    assert "# Match Report: Recovered Match" in report
+    assert "| 1 | P1 | 100 | 1 | 0 | up |" in report
+    assert "| 2 | P2 | -50 | 0 | 1 | down |" in report
+    assert "- Attempts: 1" in report
+    assert "- Resources Destroyed: yes" in report
+    assert "FLAG{1-2}" not in report
 
 
 def test_replay_submission_filter_hides_future_and_invalid_rows():
@@ -279,7 +494,7 @@ async def test_lifespan_recovers_finished_match_submissions_into_api(tmp_path, m
         assert match_id in module.referee.matches
         match = module.referee.matches[match_id]
         assert match.status == "finished"
-        assert match.persisted_submissions == [saved_submission]
+        assert match.persisted_submissions == [{**saved_submission, "flag": "********"}]
         assert match.players[1].score == 100
         assert match.players[1].attack_score == 100
         assert match.players[1].flags_captured == 1
@@ -292,7 +507,135 @@ async def test_lifespan_recovers_finished_match_submissions_into_api(tmp_path, m
         assert match_status["players"]["2"]["score"] == -50
         assert match_status["players"]["2"]["defense_score"] == -50
         response = await module.get_submissions(match_id)
-        assert response == {"match_id": match_id, "submissions": [saved_submission]}
+        assert response["match_id"] == match_id
+        assert response["submissions"][0] == {**saved_submission, "flag": "********"}
+
+
+@pytest.mark.asyncio
+async def test_lifespan_recovers_container_names_from_creation_event(tmp_path, monkeypatch):
+    db_path = tmp_path / "lifespan-containers.db"
+    monkeypatch.setattr(database, "DB_PATH", str(db_path))
+
+    await database.init_db()
+
+    created_at = datetime(2026, 3, 27, 10, 0, 0)
+    match_id = "match_container_recovery"
+    await database.save_match(match_id, "finished", _minimal_config_dict(), created_at)
+    await database.save_event(
+        match_id,
+        "CONTAINERS_CREATED",
+        {
+            "players": {
+                "1": {
+                    "target_ip": "10.196.1.2",
+                    "target_container": f"target_{match_id}_1",
+                    "network": f"awd_{match_id}_player_1",
+                    "isolated": True,
+                },
+                "2": {
+                    "target_ip": "10.196.2.2",
+                    "agent_container": f"claw_{match_id}_2",
+                    "target_container": f"target_{match_id}_2",
+                    "network": f"awd_{match_id}_player_2",
+                    "isolated": True,
+                },
+            }
+        },
+        created_at,
+    )
+
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_lifespan_container_names")
+    monkeypatch.setattr(module.referee, "validate_docker_api_compatibility", _async_noop)
+
+    async with module.lifespan(module.app):
+        match = module.referee.matches[match_id]
+        assert match.players[1].container_name == f"claw_{match_id}_1"
+        assert match.players[1].target_container == f"target_{match_id}_1"
+        assert match.players[1].network_name == f"awd_{match_id}_player_1"
+        assert match.players[1].target_ip == "10.196.1.2"
+        assert match.players[2].container_name == f"claw_{match_id}_2"
+
+
+@pytest.mark.asyncio
+async def test_lifespan_backfills_finished_event_from_last_leaderboard(tmp_path, monkeypatch):
+    db_path = tmp_path / "lifespan-backfill-finished.db"
+    monkeypatch.setattr(database, "DB_PATH", str(db_path))
+
+    await database.init_db()
+
+    created_at = datetime(2026, 3, 27, 10, 0, 0)
+    heartbeat_at = datetime(2026, 3, 27, 10, 30, 0)
+    match_id = "match_finished_backfill"
+    leaderboard = {"1": {"player_id": 1, "total_score": 500}, "2": {"player_id": 2, "total_score": -100}}
+    await database.save_match(match_id, "finished", _minimal_config_dict(), created_at)
+    await database.save_event(match_id, "HEARTBEAT", {"leaderboard": leaderboard, "remaining_seconds": 0}, heartbeat_at)
+
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_lifespan_finished_backfill")
+    monkeypatch.setattr(module.referee, "validate_docker_api_compatibility", _async_noop)
+
+    async with module.lifespan(module.app):
+        match = module.referee.matches[match_id]
+        finished_events = [event for event in match.events if event["type"] == "MATCH_FINISHED"]
+        assert len(finished_events) == 1
+        assert finished_events[0]["data"]["leaderboard"] == leaderboard
+        assert finished_events[0]["data"]["backfilled"] is True
+
+    loaded = await database.load_all_matches()
+    recovered = next(item for item in loaded if item["match_id"] == match_id)
+    assert any(event["type"] == "MATCH_FINISHED" for event in recovered["events"])
+
+
+@pytest.mark.asyncio
+async def test_lifespan_recovers_resource_destroyed_state_from_event(tmp_path, monkeypatch):
+    db_path = tmp_path / "lifespan-resource-cleanup.db"
+    monkeypatch.setattr(database, "DB_PATH", str(db_path))
+
+    await database.init_db()
+
+    created_at = datetime(2026, 3, 27, 10, 0, 0)
+    finished_at = datetime(2026, 3, 27, 10, 5, 0)
+    pending_match_id = "match_finished_pending_cleanup"
+    clean_match_id = "match_finished_clean"
+
+    await database.save_match(pending_match_id, "finished", _minimal_config_dict(), created_at)
+    await database.update_match_status(pending_match_id, "finished", finished_at)
+    await database.save_match(clean_match_id, "finished", _minimal_config_dict(), created_at + timedelta(minutes=1))
+    await database.update_match_status(clean_match_id, "finished", finished_at + timedelta(minutes=1))
+    await database.save_event(
+        clean_match_id,
+        "MATCH_RESOURCES_DESTROYED",
+        {"containers_removed": 4, "networks_removed": 3, "status": "finished"},
+        finished_at + timedelta(minutes=2),
+    )
+
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_lifespan_resource_cleanup")
+    monkeypatch.setattr(module.referee, "validate_docker_api_compatibility", _async_noop)
+
+    destroy_calls = []
+
+    async def _fake_destroy(target_match_id: str):
+        destroy_calls.append(target_match_id)
+
+    monkeypatch.setattr(module.referee, "destroy_match", _fake_destroy)
+
+    def _run_task_immediately(coro):
+        return asyncio.get_running_loop().create_task(coro)
+
+    async def _sleep_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(module.asyncio, "create_task", _run_task_immediately)
+    monkeypatch.setattr(module.asyncio, "sleep", _sleep_noop)
+
+    async with module.lifespan(module.app):
+        assert module.referee.matches[pending_match_id].resources_destroyed is False
+        assert module.referee.matches[clean_match_id].resources_destroyed is True
+        await asyncio.sleep(0)
+
+    assert destroy_calls == [pending_match_id]
 
 
 @pytest.mark.asyncio
@@ -337,7 +680,7 @@ async def test_lifespan_marks_running_match_aborted_and_keeps_submissions(tmp_pa
         assert match_id in module.referee.matches
         match = module.referee.matches[match_id]
         assert match.status == "aborted"
-        assert match.persisted_submissions == [saved_submission]
+        assert match.persisted_submissions == [{**saved_submission, "flag": "********"}]
         assert module.referee.player_match_index[1] == match_id
         assert module.referee.player_match_index[2] == match_id
         await asyncio.sleep(0)
@@ -346,6 +689,50 @@ async def test_lifespan_marks_running_match_aborted_and_keeps_submissions(tmp_pa
     recovered = next(item for item in loaded_matches if item["match_id"] == match_id)
     assert recovered["status"] == "aborted"
     assert destroy_calls == [match_id]
+
+
+@pytest.mark.asyncio
+async def test_match_summary_uses_resource_destroyed_event_for_aborted_matches(tmp_path, monkeypatch):
+    db_path = tmp_path / "summary-resource-destroyed.db"
+    monkeypatch.setattr(database, "DB_PATH", str(db_path))
+
+    await database.init_db()
+
+    created_at = datetime(2026, 3, 27, 10, 0, 0)
+    finished_at = datetime(2026, 3, 27, 10, 5, 0)
+    dirty_match_id = "match_aborted_dirty"
+    clean_match_id = "match_aborted_clean"
+    finished_dirty_match_id = "match_finished_dirty"
+    finished_clean_match_id = "match_finished_clean"
+
+    await database.save_match(dirty_match_id, "aborted", _minimal_config_dict(), created_at)
+    await database.update_match_status(dirty_match_id, "aborted", finished_at)
+    await database.save_match(clean_match_id, "aborted", _minimal_config_dict(), created_at + timedelta(minutes=1))
+    await database.update_match_status(clean_match_id, "aborted", finished_at + timedelta(minutes=1))
+    await database.save_match(finished_dirty_match_id, "finished", _minimal_config_dict(), created_at + timedelta(minutes=2))
+    await database.update_match_status(finished_dirty_match_id, "finished", finished_at + timedelta(minutes=2))
+    await database.save_match(finished_clean_match_id, "finished", _minimal_config_dict(), created_at + timedelta(minutes=3))
+    await database.update_match_status(finished_clean_match_id, "finished", finished_at + timedelta(minutes=3))
+    await database.save_event(
+        clean_match_id,
+        "MATCH_RESOURCES_DESTROYED",
+        {"containers_removed": 4, "networks_removed": 3, "status": "aborted"},
+        finished_at + timedelta(minutes=2),
+    )
+    await database.save_event(
+        finished_clean_match_id,
+        "MATCH_RESOURCES_DESTROYED",
+        {"containers_removed": 4, "networks_removed": 3, "status": "finished"},
+        finished_at + timedelta(minutes=4),
+    )
+
+    summaries = await database.list_matches_summary()
+    rows = {row["match_id"]: row for row in summaries}
+
+    assert rows[dirty_match_id]["resource_destroyed"] is False
+    assert rows[clean_match_id]["resource_destroyed"] is True
+    assert rows[finished_dirty_match_id]["resource_destroyed"] is False
+    assert rows[finished_clean_match_id]["resource_destroyed"] is True
 
 
 @pytest.mark.asyncio
@@ -385,8 +772,17 @@ async def test_events_endpoint_respects_limit_and_keeps_tail_order(monkeypatch):
 
     response = await module.get_events(match.match_id, limit=2)
 
-    assert response == {"events": match.events[-2:]}
-    assert [event["data"]["seq"] for event in response["events"]] == [2, 3]
+    assert response["events"] == match.events[:2]
+    assert response["total"] == 3
+    assert response["offset"] == 0
+    assert response["limit"] == 2
+    assert response["next_offset"] == 2
+    assert [event["data"]["seq"] for event in response["events"]] == [1, 2]
+
+    second_page = await module.get_events(match.match_id, limit=2, offset=2)
+    assert second_page["events"] == match.events[2:]
+    assert second_page["total"] == 3
+    assert second_page["next_offset"] is None
 
 
 @pytest.mark.asyncio
@@ -404,7 +800,9 @@ async def test_events_endpoint_returns_all_events_when_limit_exceeds_count(monke
 
     response = await module.get_events(match.match_id, limit=99)
 
-    assert response == {"events": match.events}
+    assert response["events"] == match.events
+    assert response["total"] == 2
+    assert response["next_offset"] is None
 
 
 @pytest.mark.asyncio
@@ -418,7 +816,9 @@ async def test_events_endpoint_returns_empty_list_for_match_without_events(monke
 
     response = await module.get_events(match.match_id, limit=50)
 
-    assert response == {"events": []}
+    assert response["events"] == []
+    assert response["total"] == 0
+    assert response["next_offset"] is None
 
 
 def test_scoring_engine_uses_passed_submission_source_only():
@@ -451,6 +851,7 @@ async def test_success_submission_updates_score_from_persisted_submissions_not_r
         return None
 
     monkeypatch.setattr(module.database, "save_submission", _fake_save_submission)
+    monkeypatch.setattr(module.database, "save_event", _async_save_event_noop)
 
     config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1"), module.PlayerConfig(id=2, name="P2")])
     match = module.MatchState("match_scoring_source", config)
@@ -478,15 +879,16 @@ async def test_success_submission_updates_score_from_persisted_submissions_not_r
 
 
 def test_validate_submission_returns_explicit_submission_record():
+    import asyncio
     manager = FlagManager(scoring_config={"attackSuccess": 100, "defenseFailure": -50})
     manager.all_flags["FLAG{explicit}"] = 2
 
-    result = manager.validate_submission(
+    result = asyncio.run(manager.validate_submission(
         attacker_id=1,
         flag="FLAG{explicit}",
         declared_target_player_id=2,
         player_count=3,
-    )
+    ))
 
     assert result["success"] is True
     assert result["submission_record"] == manager.submissions[-1]
@@ -506,6 +908,7 @@ async def test_submit_flag_persists_returned_submission_record_even_if_runtime_t
         saved_records.append((match_id, dict(submission)))
 
     monkeypatch.setattr(module.database, "save_submission", _fake_save_submission)
+    monkeypatch.setattr(module.database, "save_event", _async_save_event_noop)
 
     config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1"), module.PlayerConfig(id=2, name="P2")])
     match = module.MatchState("match_submission_record_source", config)
@@ -516,8 +919,8 @@ async def test_submit_flag_persists_returned_submission_record_even_if_runtime_t
 
     original_validate = match.flag_manager.validate_submission
 
-    def _wrapped_validate(*args, **kwargs):
-        result = original_validate(*args, **kwargs)
+    async def _wrapped_validate(*args, **kwargs):
+        result = await original_validate(*args, **kwargs)
         match.flag_manager.submissions.append({
             "attacker_id": 999,
             "victim_id": 999,
@@ -554,6 +957,7 @@ async def test_submit_flag_returns_player_feedback_with_status_query_hint(monkey
         return None
 
     monkeypatch.setattr(module.database, "save_submission", _fake_save_submission)
+    monkeypatch.setattr(module.database, "save_event", _async_save_event_noop)
 
     config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1"), module.PlayerConfig(id=2, name="P2")])
     match = module.MatchState("match_submission_feedback", config)
@@ -569,21 +973,30 @@ async def test_submit_flag_returns_player_feedback_with_status_query_hint(monkey
     )
 
     assert result["success"] is True
-    assert result["player_feedback"] == {
-        "summary": (
-            "Flag 提交成功，分数已计入。"
-            "若你当前主要依赖 1/2 号 flag 得分，建议下一步优先寻找更高价值的 3/4 号 flag。"
-            "重点检查 SSRF、内网接口、管理面、敏感凭据、高权限文件与提权链。 You gained 100 points."
-        ),
-        "status_query_recommended": True,
-        "status_query_hint": (
-            "Before choosing your next move, query GET /api/player/status with your existing "
-            "X-Player-Token to refresh score gaps, ranking, remaining time, current target context, "
-            "and score changes since your last status query."
-        ),
-        "player_status_endpoint": "/api/player/status",
-        "required_header": "X-Player-Token",
-    }
+    _assert_success_feedback(result["player_feedback"])
+
+
+@pytest.mark.asyncio
+async def test_wait_for_all_players_ready_retries_pending_players(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_wait_ready_retries")
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1")])
+    match = module.MatchState("match_wait_ready_retries", config)
+    match.players[1] = PlayerState(player_id=1, container_name="c1", target_container="t1", target_ip="10.0.0.1")
+
+    retry_calls = []
+
+    async def _fake_retry_not_ready_agents(match_obj, player_ids):
+        retry_calls.append(list(player_ids))
+        match_obj.players[1].ready_status = "AGENT_READY"
+        return 1
+
+    monkeypatch.setattr(module.referee, "_retry_not_ready_agents", _fake_retry_not_ready_agents)
+
+    await module.referee._wait_for_all_players_ready(match)
+
+    assert retry_calls == [[1]]
 
 
 @pytest.mark.asyncio
@@ -617,6 +1030,7 @@ async def test_send_defense_keepalive_enqueues_buffered_message(monkeypatch):
     assert call["message_kind"] == "keepalive"
     assert call["dedupe_key"] == "keepalive"
     assert call["merge_strategy"] == "replace"
+    assert session.last_keepalive_sent_at is not None
     assert any(event["type"] == "DEFENSE_KEEPALIVE_BUFFERED" for event in match.events)
 
 
@@ -687,7 +1101,10 @@ async def test_send_attack_keepalive_enqueues_buffered_message_without_advancing
     assert call["dedupe_key"] == "attack_keepalive"
     assert call["merge_strategy"] == "replace"
     assert '"phase": "attack"' in call["message"]
-    assert "请你根据最新场况，持续攻击对手，加固自己靶机的防御。" in call["message"]
+    assert "Continue attacking opponents while keeping your own target patched." in call["message"]
+    assert "target-ssh '<remote command>'" in call["message"]
+    assert "target-ssh 'curl -sf http://localhost:3000/health'" in call["message"]
+    assert session.last_keepalive_sent_at is not None
     assert match.player_status_checkpoints[1] == {
         "queried_at": "baseline-query",
         "scores_by_player": {
@@ -743,6 +1160,100 @@ async def test_attack_keepalive_loop_triggers_after_stream_idle_threshold(monkey
 
 
 @pytest.mark.asyncio
+async def test_defense_keepalive_loop_triggers_for_inactive_session_with_client(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_defense_keepalive_inactive")
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1")])
+    match = module.MatchState("match_defense_keepalive_inactive", config)
+    match.status = "defense"
+    now = datetime.now()
+    match.started_at = now
+    match.defense_started_at = now
+    match.players[1] = PlayerState(player_id=1, container_name="c1", target_container="t1", target_ip="10.0.0.1")
+    session = AgentSession(player_id=1, container_name="c1", target_container="t1", target_ip="10.0.0.1")
+    match.agent_sessions[1] = session
+
+    class DummyBackend:
+        @staticmethod
+        def is_session_busy(agent_client, session):
+            return False
+
+        @staticmethod
+        def has_buffered_message_kind(agent_client, session, message_kind):
+            return False
+
+    class DummyClient:
+        pass
+
+    match.player_clients[1] = DummyClient()
+    match.player_backends[1] = DummyBackend()
+
+    captured_calls = []
+
+    async def _fake_send_defense_keepalive(match_obj, player_id, session_obj):
+        captured_calls.append((match_obj.match_id, player_id, session_obj.player_id))
+        match_obj.status = "finished"
+
+    async def _fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(module.referee, "_send_defense_keepalive", _fake_send_defense_keepalive)
+    monkeypatch.setattr(module.asyncio, "sleep", _fake_sleep)
+
+    await module.referee._defense_keepalive_loop(match)
+
+    assert captured_calls == [(match.match_id, 1, 1)]
+
+
+@pytest.mark.asyncio
+async def test_match_timer_cancellation_drains_heartbeat_and_keepalive_tasks(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_match_timer_cancel_drains_children")
+
+    config = module.MatchConfig(
+        match=module.MatchDetails(
+            name="Cancel Timer",
+            duration=120,
+            phases=module.MatchPhaseConfig(defense=120, attack=0),
+        ),
+        players=[module.PlayerConfig(id=1, name="P1")],
+    )
+    match = module.MatchState("match_timer_cancel_drains", config)
+    match.status = "defense"
+
+    heartbeat_cancelled = asyncio.Event()
+    keepalive_cancelled = asyncio.Event()
+
+    async def _fake_heartbeat_loop(match_obj, total_seconds):
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            heartbeat_cancelled.set()
+            raise
+
+    async def _fake_defense_keepalive_loop(match_obj):
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            keepalive_cancelled.set()
+            raise
+
+    monkeypatch.setattr(module.referee, "_heartbeat_loop", _fake_heartbeat_loop)
+    monkeypatch.setattr(module.referee, "_defense_keepalive_loop", _fake_defense_keepalive_loop)
+
+    timer_task = asyncio.create_task(module.referee._match_timer(match))
+    await asyncio.sleep(0)
+
+    timer_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await timer_task
+
+    assert heartbeat_cancelled.is_set()
+    assert keepalive_cancelled.is_set()
+
+
+@pytest.mark.asyncio
 async def test_submit_flag_enqueues_victim_alert_instead_of_fire_and_forget(monkeypatch):
     monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
     module = _load_main_module("test_main_submission_buffered_alert")
@@ -751,6 +1262,7 @@ async def test_submit_flag_enqueues_victim_alert_instead_of_fire_and_forget(monk
         return None
 
     monkeypatch.setattr(module.database, "save_submission", _fake_save_submission)
+    monkeypatch.setattr(module.database, "save_event", _async_save_event_noop)
 
     config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1"), module.PlayerConfig(id=2, name="P2")])
     match = module.MatchState("match_submission_buffered_alert", config)
@@ -959,6 +1471,84 @@ async def test_match_timer_starts_attack_keepalive_loop(monkeypatch):
 
     assert attack_keepalive_calls == [match.match_id]
     assert end_match_calls == [match.match_id]
+
+
+@pytest.mark.asyncio
+async def test_match_timer_cancels_slow_attack_prompt_tasks(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_attack_prompt_cancel_drains")
+
+    async def _fake_update_match_status(*args, **kwargs):
+        return None
+
+    async def _fake_open_arena_network(match):
+        return None
+
+    monkeypatch.setattr(module.database, "update_match_status", _fake_update_match_status)
+    monkeypatch.setattr(module.referee, "_open_arena_network", _fake_open_arena_network)
+    monkeypatch.setattr(module.referee, "end_match", _async_save_event_noop)
+    monkeypatch.setattr(module.referee, "_attack_prompt_delivery_timeout", lambda *_args: 1)
+
+    class DummyContainer:
+        def __init__(self, ip: str):
+            self.attrs = {"NetworkSettings": {"Networks": {"awd_match_attack_prompt_cancel_drains_arena": {"IPAddress": ip}}}}
+
+        def reload(self):
+            return None
+
+    class DummyDockerClient:
+        class Containers:
+            @staticmethod
+            def get(name: str):
+                return DummyContainer("10.10.0.2")
+
+        containers = Containers()
+
+    monkeypatch.setattr(module.docker, "from_env", lambda: DummyDockerClient())
+
+    config = module.MatchConfig(
+        match=module.MatchDetails(name="Attack Prompt Cancel", duration=1, phases=module.MatchPhaseConfig(defense=0, attack=1)),
+        players=[module.PlayerConfig(id=1, name="P1")],
+    )
+    match = module.MatchState("match_attack_prompt_cancel_drains", config)
+    match.status = "defense"
+    match.started_at = datetime.now()
+    match.defense_started_at = datetime.now()
+    match.players[1] = PlayerState(player_id=1, container_name="c1", target_container="t1", target_ip="10.0.0.1")
+    match.agent_sessions[1] = AgentSession(player_id=1, container_name="c1", target_container="t1", target_ip="10.0.0.1")
+    match.agent_sessions[1].last_activity_at = asyncio.get_running_loop().time()
+    match.player_read_tokens[1] = "token-1"
+
+    attack_prompt_started = asyncio.Event()
+    attack_prompt_cancelled = asyncio.Event()
+
+    class DummyPlayerClient:
+        def freeze_buffered_messages(self, session):
+            return None
+
+        def unfreeze_buffered_messages(self, session):
+            return None
+
+        async def send_message(self, session, message, **kwargs):
+            attack_prompt_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                attack_prompt_cancelled.set()
+                raise
+
+        async def check_session_contains(self, session, keyword, tail_lines=50):
+            return True
+
+        async def drain_buffered_messages(self, session):
+            return 0
+
+    match.player_clients[1] = DummyPlayerClient()
+
+    await module.referee._match_timer(match)
+
+    assert attack_prompt_started.is_set()
+    assert attack_prompt_cancelled.is_set()
 
 
 @pytest.mark.asyncio
@@ -1294,6 +1884,7 @@ async def test_submit_flag_scores_even_when_declared_target_mismatches(monkeypat
         saved_submissions.append((match_id, dict(submission)))
 
     monkeypatch.setattr(module.database, "save_submission", _fake_save_submission)
+    monkeypatch.setattr(module.database, "save_event", _async_save_event_noop)
 
     config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1"), module.PlayerConfig(id=2, name="P2")])
     match = module.MatchState("match_submission_feedback_rejected", config)
@@ -1313,21 +1904,7 @@ async def test_submit_flag_scores_even_when_declared_target_mismatches(monkeypat
     assert result["victim_id"] == 2
     assert match.players[1].attack_score == 100
     assert match.players[2].defense_score == -50
-    assert result["player_feedback"] == {
-        "summary": (
-            "Flag 提交成功，分数已计入。"
-            "若你当前主要依赖 1/2 号 flag 得分，建议下一步优先寻找更高价值的 3/4 号 flag。"
-            "重点检查 SSRF、内网接口、管理面、敏感凭据、高权限文件与提权链。 You gained 100 points."
-        ),
-        "status_query_recommended": True,
-        "status_query_hint": (
-            "Before choosing your next move, query GET /api/player/status with your existing "
-            "X-Player-Token to refresh score gaps, ranking, remaining time, current target context, "
-            "and score changes since your last status query."
-        ),
-        "player_status_endpoint": "/api/player/status",
-        "required_header": "X-Player-Token",
-    }
+    _assert_success_feedback(result["player_feedback"])
     assert len(saved_submissions) == 1
     persisted = saved_submissions[0][1]
     assert persisted["success"] is True
@@ -1351,6 +1928,7 @@ async def test_submit_endpoint_returns_player_feedback_via_http(monkeypatch):
     monkeypatch.setattr(module.database, "init_db", _async_noop)
     monkeypatch.setattr(module.database, "load_all_matches", _async_empty_matches)
     monkeypatch.setattr(module.database, "save_submission", _fake_save_submission)
+    monkeypatch.setattr(module.database, "save_event", _async_save_event_noop)
     monkeypatch.setattr(module.database, "save_event", _fake_save_event)
 
     config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1"), module.PlayerConfig(id=2, name="P2")])
@@ -1361,6 +1939,32 @@ async def test_submit_endpoint_returns_player_feedback_via_http(monkeypatch):
     match.flag_manager.all_flags["FLAG{http}"] = 2
     module.referee.matches[match.match_id] = match
     module.referee.player_match_index[1] = match.match_id
+    token = module.referee._issue_player_read_token(match, 1)
+
+    transport = httpx.ASGITransport(app=module.app)
+    async with module.app.router.lifespan_context(module.app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/submit",
+                json={"target_player_id": 2, "flag": "FLAG{http}"},
+                headers={"X-Player-Token": token},
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["reason"] == "success"
+    _assert_success_feedback(payload["player_feedback"])
+
+
+@pytest.mark.asyncio
+async def test_submit_endpoint_rejects_missing_player_token(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_submit_http_missing_token")
+
+    monkeypatch.setattr(module.referee, "validate_docker_api_compatibility", _async_noop)
+    monkeypatch.setattr(module.database, "init_db", _async_noop)
+    monkeypatch.setattr(module.database, "load_all_matches", _async_empty_matches)
 
     transport = httpx.ASGITransport(app=module.app)
     async with module.app.router.lifespan_context(module.app):
@@ -1370,25 +1974,36 @@ async def test_submit_endpoint_returns_player_feedback_via_http(monkeypatch):
                 json={"player_id": 1, "target_player_id": 2, "flag": "FLAG{http}"},
             )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["success"] is True
-    assert payload["reason"] == "success"
-    assert payload["player_feedback"] == {
-        "summary": (
-            "Flag 提交成功，分数已计入。"
-            "若你当前主要依赖 1/2 号 flag 得分，建议下一步优先寻找更高价值的 3/4 号 flag。"
-            "重点检查 SSRF、内网接口、管理面、敏感凭据、高权限文件与提权链。 You gained 100 points."
-        ),
-        "status_query_recommended": True,
-        "status_query_hint": (
-            "Before choosing your next move, query GET /api/player/status with your existing "
-            "X-Player-Token to refresh score gaps, ranking, remaining time, current target context, "
-            "and score changes since your last status query."
-        ),
-        "player_status_endpoint": "/api/player/status",
-        "required_header": "X-Player-Token",
-    }
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_submit_endpoint_rejects_spoofed_player_id(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_submit_http_spoofed_player")
+
+    monkeypatch.setattr(module.referee, "validate_docker_api_compatibility", _async_noop)
+    monkeypatch.setattr(module.database, "init_db", _async_noop)
+    monkeypatch.setattr(module.database, "load_all_matches", _async_empty_matches)
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1"), module.PlayerConfig(id=2, name="P2")])
+    match = module.MatchState("match_submit_http_spoofed", config)
+    match.status = "attack"
+    match.players[1] = PlayerState(player_id=1, container_name="c1", target_container="t1", target_ip="10.0.0.1")
+    match.players[2] = PlayerState(player_id=2, container_name="c2", target_container="t2", target_ip="10.0.0.2")
+    module.referee.matches[match.match_id] = match
+    token = module.referee._issue_player_read_token(match, 1)
+
+    transport = httpx.ASGITransport(app=module.app)
+    async with module.app.router.lifespan_context(module.app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/submit",
+                json={"player_id": 2, "target_player_id": 1, "flag": "FLAG{http}"},
+                headers={"X-Player-Token": token},
+            )
+
+    assert response.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -1413,4 +2028,112 @@ async def test_detail_endpoint_keeps_recent_summary_while_events_endpoint_keeps_
     assert detail["events_count"] == 3
     assert "events" not in detail
     assert "agent_logs" not in detail
-    assert feed == {"events": match.events}
+    assert feed["events"] == match.events
+    assert feed["total"] == 3
+
+
+def test_werewolf_detail_recent_events_uses_same_public_filter_as_events_endpoint(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_werewolf_detail_event_filter")
+
+    players = [module.PlayerConfig(id=i, name=f"P{i}") for i in range(1, 13)]
+    config = module.MatchConfig(mode="werewolf", players=players)
+    match = module.MatchState("match_werewolf_detail_filter", config)
+    match.events = [
+        {"type": "AGENT_STREAM", "data": {"player_id": 1, "content": "private reasoning"}, "timestamp": "2026-03-27T10:00:01", "match_id": match.match_id},
+        {"type": "WEREWOLF_PUBLIC_SPEECH", "data": {"player_id": 1, "text": "public"}, "timestamp": "2026-03-27T10:00:02", "match_id": match.match_id},
+        {"type": "WEREWOLF_PLAYER_TURN_STARTED_PRIVATE", "data": {"role": "seer"}, "timestamp": "2026-03-27T10:00:03", "match_id": match.match_id, "audience": "hidden"},
+        {"type": "MATCH_FINISHED", "data": {"mode": "werewolf"}, "timestamp": "2026-03-27T10:00:04", "match_id": match.match_id},
+    ]
+    module.referee.matches[match.match_id] = match
+
+    detail = module.referee.get_match_status(match.match_id)
+
+    assert [event["type"] for event in detail["recent_events"]] == [
+        "WEREWOLF_PUBLIC_SPEECH",
+        "MATCH_FINISHED",
+    ]
+    assert detail["events_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_public_events_redact_agent_stream_logs_and_flags(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_public_event_redaction")
+
+    config = module.MatchConfig(players=[module.PlayerConfig(id=1, name="P1"), module.PlayerConfig(id=2, name="P2")])
+    match = module.MatchState("match_public_event_redaction", config)
+    match.events = [
+        {
+            "type": "AGENT_STREAM",
+            "data": {
+                "player_id": 1,
+                "content": (
+                    "Authorization: Bearer stream-secret-token\n"
+                    "X-Player-Token: player-secret-token\n"
+                    "api_key=sk-streamsecret\n"
+                    "found FLAG{stream-secret}"
+                ),
+            },
+            "timestamp": "2026-03-27T10:00:01",
+            "match_id": match.match_id,
+        },
+        {
+            "type": "AGENT_LOGS_COLLECTED",
+            "data": {
+                "players": {1: 128},
+                "logs": {
+                    1: (
+                        "cookie=session-secret; token=log-secret\n"
+                        "Authorization: Bearer log-secret-token\n"
+                        "FLAG{log-secret}"
+                    )
+                },
+            },
+            "timestamp": "2026-03-27T10:00:02",
+            "match_id": match.match_id,
+        },
+        {
+            "type": "FLAG_SUBMISSION",
+            "data": _build_submission(
+                attacker_id=1,
+                victim_id=2,
+                success=True,
+                timestamp="2026-03-27T10:00:03",
+                flag_slot="database_flag",
+                flag_index=2,
+            ),
+            "timestamp": "2026-03-27T10:00:03",
+            "match_id": match.match_id,
+        },
+    ]
+    module.referee.matches[match.match_id] = match
+
+    detail = module.referee.get_match_status(match.match_id)
+    feed = await module.get_events(match.match_id, limit=100)
+    serialized = json.dumps({"detail": detail, "feed": feed}, ensure_ascii=False)
+
+    assert "stream-secret-token" not in serialized
+    assert "player-secret-token" not in serialized
+    assert "sk-streamsecret" not in serialized
+    assert "log-secret-token" not in serialized
+    assert "session-secret" not in serialized
+    assert "log-secret" not in serialized
+    assert "FLAG{stream-secret}" not in serialized
+    assert "FLAG{log-secret}" not in serialized
+    assert "FLAG{1-2}" not in serialized
+    assert "FLAG{********}" in serialized
+
+
+def test_public_agent_log_redaction_preserves_runtime_raw_logs(monkeypatch):
+    monkeypatch.setattr("asyncio.create_subprocess_shell", lambda *args, **kwargs: None)
+    module = _load_main_module("test_main_public_log_redaction_helper")
+
+    raw_logs = {
+        1: "Authorization: Bearer runtime-secret-token\nFLAG{runtime-secret}\n",
+    }
+    public_logs = module.sanitize_public_agent_logs(raw_logs)
+
+    assert raw_logs[1].startswith("Authorization: Bearer runtime-secret-token")
+    assert "runtime-secret-token" not in public_logs[1]
+    assert "FLAG{runtime-secret}" not in public_logs[1]

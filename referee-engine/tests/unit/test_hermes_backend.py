@@ -16,7 +16,7 @@ from backends.hermes_backend import HermesAgentClient, HermesBackendAdapter  # n
 
 def _build_match_config():
     return SimpleNamespace(
-        agent_image="alpine/openclaw:latest",
+        agent_image="openclaw/local-agent:ssh",
         llm=SimpleNamespace(
             apiKey="global-key",
             baseUrl="https://example.test/v1",
@@ -30,10 +30,13 @@ def _build_match_state(match_id="match-test"):
     return SimpleNamespace(match_id=match_id, config=_build_match_config())
 
 
-def _build_player_config(*, api_key=None, model=None, image=None, extra_env=None):
+def _build_player_config(*, api_key=None, base_url=None, provider=None, api=None, model=None, image=None, extra_env=None):
     return SimpleNamespace(
         id=7,
         apiKey=api_key,
+        baseUrl=base_url,
+        provider=provider,
+        api=api,
         model=model,
         backend_config=SimpleNamespace(
             image=image,
@@ -55,6 +58,7 @@ def test_hermes_backend_container_spec_exposes_wrapper_mounts_and_entrypoint():
     assert spec.environment["OPENAI_API_KEY"] == "global-key"
     assert spec.environment["OPENAI_BASE_URL"] == "https://example.test/v1"
     assert spec.environment["OPENAI_MODEL"] == "player-model"
+    assert spec.environment["OPENCLAW_PROVIDER_API"] == "openai-completions"
     assert spec.environment["HERMES_HOME"] == "/opt/data"
     assert spec.environment["CUSTOM_FLAG"] == "enabled"
     assert spec.volumes == {
@@ -100,6 +104,29 @@ def test_hermes_backend_resolves_target_ssh_for_hermes_runtime_home():
     assert ssh_spec.helper_path == "/usr/local/bin/target-ssh"
 
 
+def test_hermes_backend_prefers_player_llm_endpoint_and_provider_api():
+    adapter = HermesBackendAdapter()
+    match_config = _build_match_state()
+    player_config = _build_player_config(
+        api_key="player-key",
+        base_url="https://player-api.test/v1",
+        api="anthropic",
+        model="player-model",
+    )
+
+    spec = adapter.build_agent_container_spec(match_config, player_config)
+    client = adapter.create_client(match_config, player_config)
+
+    assert spec.environment["OPENAI_API_KEY"] == "player-key"
+    assert spec.environment["OPENAI_BASE_URL"] == "https://player-api.test/v1"
+    assert spec.environment["OPENAI_MODEL"] == "player-model"
+    assert spec.environment["OPENCLAW_PROVIDER_API"] == "anthropic"
+    assert client.llm_api_key == "player-key"
+    assert client.llm_base_url == "https://player-api.test/v1"
+    assert client.llm_model == "player-model"
+    assert client.provider_api == "anthropic"
+
+
 @pytest.mark.asyncio
 async def test_hermes_backend_cleanup_removes_named_runtime_volume(monkeypatch):
     adapter = HermesBackendAdapter()
@@ -112,15 +139,15 @@ async def test_hermes_backend_cleanup_removes_named_runtime_volume(monkeypatch):
         async def communicate(self):
             return (b"deleted\n", b"")
 
-    async def fake_create_subprocess_shell(command, stdout=None, stderr=None):
+    async def fake_create_subprocess_exec(*command, stdout=None, stderr=None):
         commands.append(command)
         return FakeProc()
 
-    monkeypatch.setattr("backends.hermes_backend.asyncio.create_subprocess_shell", fake_create_subprocess_shell)
+    monkeypatch.setattr("backends.hermes_backend.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
     await adapter.cleanup(_build_match_state("match cleanup/42"), 7, None, fake_client)
 
-    assert commands == ["docker volume rm openclaw_hermes_runtime_match-cleanup-42_player_7"]
+    assert commands == [("docker", "volume", "rm", "openclaw_hermes_runtime_match-cleanup-42_player_7")]
 
 
 @pytest.mark.asyncio
@@ -134,10 +161,10 @@ async def test_hermes_backend_cleanup_swallows_missing_volume_errors(monkeypatch
         async def communicate(self):
             return (b"", b"Error: No such volume")
 
-    async def fake_create_subprocess_shell(command, stdout=None, stderr=None):
+    async def fake_create_subprocess_exec(*command, stdout=None, stderr=None):
         return FakeProc()
 
-    monkeypatch.setattr("backends.hermes_backend.asyncio.create_subprocess_shell", fake_create_subprocess_shell)
+    monkeypatch.setattr("backends.hermes_backend.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
     await adapter.cleanup(_build_match_state("match-test"), 7, None, fake_client)
 

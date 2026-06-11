@@ -2,23 +2,40 @@ from typing import Any, Optional
 
 from agent_client import AgentClient
 
-from .base import AgentBackendAdapter, BackendContainerSpec, BackendTargetSSHSpec, StreamCallback
+from .base import AgentBackendAdapter, BackendContainerSpec, BackendTargetSSHSpec, StreamCallback, normalize_provider_api
 
 
 CONTAINER_TIMEZONE = "Asia/Shanghai"
+DEFAULT_AGENT_IMAGE = "openclaw/local-agent:ssh"
 
 
 class OpenClawBackendAdapter(AgentBackendAdapter):
     backend_type = "openclaw"
+
+    @staticmethod
+    def _resolve_player_llm(match_config: Any, player_config: Any) -> tuple[str, str, str, str]:
+        config = getattr(match_config, "config", match_config)
+        llm_config = getattr(config, "llm", None)
+        api_key = getattr(player_config, "apiKey", None) or getattr(llm_config, "apiKey", "")
+        base_url = getattr(player_config, "baseUrl", None) or getattr(llm_config, "baseUrl", "")
+        model = getattr(player_config, "model", None) or getattr(llm_config, "model", "gpt-5.5")
+        provider_api = getattr(player_config, "api", None) or getattr(player_config, "provider", None) or getattr(
+            llm_config, "provider", "openai-completions"
+        )
+        return api_key, base_url, model, normalize_provider_api(provider_api)
 
     def build_agent_container_spec(self, match_config: Any, player_config: Any) -> BackendContainerSpec:
         config = getattr(match_config, "config", match_config)
         backend_config = getattr(player_config, "backend_config", None)
         image_override = getattr(backend_config, "image", None) if backend_config is not None else None
         extra_env = getattr(backend_config, "extra_env", None) if backend_config is not None else None
+        llm_api_key, llm_base_url, llm_model, llm_provider_api = self._resolve_player_llm(config, player_config)
 
         environment = {
-            "OPENAI_API_KEY": player_config.apiKey or config.llm.apiKey,
+            "OPENAI_API_KEY": llm_api_key,
+            "OPENAI_BASE_URL": llm_base_url,
+            "OPENAI_MODEL": llm_model,
+            "OPENCLAW_PROVIDER_API": llm_provider_api,
             "HTTPS_PROXY": config.llm.proxy,
             "HTTP_PROXY": config.llm.proxy,
             "NO_PROXY": "localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8,host.docker.internal,.local",
@@ -27,17 +44,23 @@ class OpenClawBackendAdapter(AgentBackendAdapter):
         if isinstance(extra_env, dict):
             environment.update({str(key): str(value) for key, value in extra_env.items()})
 
+        selected_image = image_override or config.agent_image or DEFAULT_AGENT_IMAGE
+        if selected_image == "alpine/openclaw:latest":
+            selected_image = DEFAULT_AGENT_IMAGE
+
         return BackendContainerSpec(
-            image=image_override or config.agent_image or "alpine/openclaw:latest",
+            image=selected_image,
             environment=environment,
         )
 
     def create_client(self, match_config: Any, player_config: Any) -> AgentClient:
+        llm_api_key, llm_base_url, llm_model, llm_provider_api = self._resolve_player_llm(match_config, player_config)
         return AgentClient(
-            llm_api_key=player_config.apiKey or match_config.llm.apiKey,
-            llm_base_url=match_config.llm.baseUrl,
-            llm_model=player_config.model or match_config.llm.model,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
             proxy_url=match_config.llm.proxy,
+            provider_api=llm_provider_api,
         )
 
     def resolve_target_ssh_spec(self, match_config: Any, player_config: Any) -> BackendTargetSSHSpec:

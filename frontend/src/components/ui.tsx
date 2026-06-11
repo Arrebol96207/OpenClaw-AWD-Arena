@@ -4,23 +4,13 @@ import { ChevronDown, Loader2 } from 'lucide-react'
 export const cx = (...classes: Array<string | false | null | undefined>): string =>
   classes.filter(Boolean).join(' ')
 
-type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'warning' | 'ghost'
-type BadgeTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'
+type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'outline'
 
 const buttonVariants: Record<ButtonVariant, string> = {
-  primary: 'bg-cyan-600 text-white hover:bg-cyan-500 focus:ring-cyan-400/40',
-  secondary: 'bg-slate-800 text-slate-200 hover:bg-slate-700 focus:ring-slate-400/30',
-  danger: 'bg-rose-600 text-white hover:bg-rose-500 focus:ring-rose-400/40',
-  warning: 'bg-amber-600 text-white hover:bg-amber-500 focus:ring-amber-400/40',
-  ghost: 'bg-transparent text-slate-400 hover:bg-slate-800 hover:text-slate-200 focus:ring-slate-400/30',
-}
-
-export const badgeTones: Record<BadgeTone, string> = {
-  neutral: 'bg-slate-800 text-slate-300',
-  info: 'bg-cyan-900/50 text-cyan-300',
-  success: 'bg-emerald-900/50 text-emerald-300',
-  warning: 'bg-amber-900/50 text-amber-300',
-  danger: 'bg-rose-900/50 text-rose-300',
+  primary: 'bg-white text-neutral-900 hover:bg-neutral-100 font-medium',
+  secondary: 'bg-neutral-800/80 text-neutral-200 hover:bg-neutral-700/80 font-medium',
+  outline: 'border border-neutral-700 text-neutral-200 hover:bg-neutral-800 font-medium',
+  ghost: 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/60',
 }
 
 export type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -44,106 +34,123 @@ export const Button: React.FC<ButtonProps> = ({
   <button
     type={type ?? 'button'}
     disabled={disabled || loading}
-    aria-busy={loading || undefined}
     {...props}
     className={cx(
-      'inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-md font-medium transition',
-      'focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50',
-      size === 'sm' ? 'px-2 py-1 text-xs' : 'px-3 py-1.5 text-sm',
+      'inline-flex items-center justify-center gap-1.5 rounded-lg transition-colors',
+      'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-neutral-400',
+      'disabled:pointer-events-none disabled:opacity-50',
+      size === 'sm' ? 'h-8 px-3 text-xs' : 'h-9 px-4 text-sm',
       buttonVariants[variant],
       className,
     )}
   >
-    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : icon}
+    {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : icon}
     {children}
   </button>
 )
 
-export const Panel: React.FC<React.HTMLAttributes<HTMLElement> & { title?: string }> = ({
-  title,
-  className,
-  children,
-  ...props
-}) => (
-  <section
-    {...props}
-    className={cx('rounded-lg border border-slate-800 bg-slate-900/50 p-4', className)}
-  >
-    {title && (
-      <h2 className="mb-3 text-sm font-medium text-slate-300">{title}</h2>
+export const Card: React.FC<{
+  title?: string
+  description?: string
+  className?: string
+  children: React.ReactNode
+  action?: React.ReactNode
+}> = ({ title, description, className, children, action }) => (
+  <div className={cx('rounded-xl bg-neutral-900/80 ring-1 ring-neutral-800/60', className)}>
+    {(title || action) && (
+      <div className="flex items-center justify-between border-b border-neutral-800/60 px-5 py-4">
+        <div>
+          {title && <h3 className="text-sm font-semibold text-neutral-100">{title}</h3>}
+          {description && <p className="mt-0.5 text-xs text-neutral-500">{description}</p>}
+        </div>
+        {action}
+      </div>
     )}
-    {children}
-  </section>
+    <div className="p-5">{children}</div>
+  </div>
 )
+
+export const Panel = Card
 
 export const CollapsiblePanel: React.FC<{
   title: string
+  description?: string
   defaultOpen?: boolean
   className?: string
   children: React.ReactNode
-}> = ({ title, defaultOpen = false, className, children }) => {
+}> = ({ title, description, defaultOpen = false, className, children }) => {
   const [open, setOpen] = useState(defaultOpen)
 
   return (
-    <section className={cx('rounded-lg border border-slate-800 bg-slate-900/50', className)}>
+    <div className={cx('rounded-xl bg-neutral-900/80 ring-1 ring-neutral-800/60', className)}>
       <button
         type="button"
-        className="flex w-full items-center justify-between px-4 py-3 text-sm font-medium text-slate-300 hover:bg-slate-800/50"
+        className="flex w-full items-center justify-between px-5 py-4 text-left"
         onClick={() => setOpen(!open)}
       >
-        <span>{title}</span>
-        <ChevronDown className={cx('h-4 w-4 text-slate-500 transition-transform', open && 'rotate-180')} />
+        <div>
+          <h3 className="text-sm font-semibold text-neutral-100">{title}</h3>
+          {description && <p className="mt-0.5 text-xs text-neutral-500">{description}</p>}
+        </div>
+        <ChevronDown className={cx('h-4 w-4 text-neutral-500 transition-transform', open && 'rotate-180')} />
       </button>
-      {open && <div className="border-t border-slate-800 px-4 py-3">{children}</div>}
-    </section>
+      {open && <div className="border-t border-neutral-800/60 px-5 py-4">{children}</div>}
+    </div>
   )
 }
 
-export const StatusBadge: React.FC<React.HTMLAttributes<HTMLSpanElement> & { tone?: BadgeTone }> = ({
-  tone = 'neutral',
-  className,
-  children,
-  ...props
-}) => (
-  <span
-    {...props}
-    className={cx(
-      'inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs',
-      badgeTones[tone],
-      className,
-    )}
-  >
+type BadgeVariant = 'default' | 'success' | 'warning' | 'error'
+
+const badgeVariants: Record<BadgeVariant, string> = {
+  default: 'bg-neutral-800 text-neutral-300',
+  success: 'bg-emerald-500/10 text-emerald-400',
+  warning: 'bg-amber-500/10 text-amber-400',
+  error: 'bg-red-500/10 text-red-400',
+}
+
+export const Badge: React.FC<{
+  variant?: BadgeVariant
+  className?: string
+  children: React.ReactNode
+}> = ({ variant = 'default', className, children }) => (
+  <span className={cx('inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium', badgeVariants[variant], className)}>
     {children}
   </span>
 )
 
-export const Field: React.FC<React.LabelHTMLAttributes<HTMLLabelElement> & { label: string; hint?: string }> = ({
-  label,
-  hint,
-  className,
-  children,
-  ...props
-}) => (
-  <label {...props} className={cx('block space-y-1 text-sm', className)}>
-    <span className="text-slate-400">{label}</span>
+export const StatusBadge: React.FC<{
+  tone?: 'neutral' | 'info' | 'success' | 'warning' | 'danger'
+  className?: string
+  children: React.ReactNode
+}> = ({ tone = 'neutral', className, children }) => {
+  const variantMap: Record<string, BadgeVariant> = {
+    neutral: 'default', info: 'default', success: 'success', warning: 'warning', danger: 'error',
+  }
+  return <Badge variant={variantMap[tone]} className={className}>{children}</Badge>
+}
+
+export const Field: React.FC<{
+  label: string
+  hint?: string
+  className?: string
+  children: React.ReactNode
+}> = ({ label, hint, className, children }) => (
+  <div className={cx('space-y-1.5', className)}>
+    <label className="block text-xs font-medium text-neutral-400">{label}</label>
     {children}
-    {hint && <span className="block text-xs text-slate-600">{hint}</span>}
-  </label>
+    {hint && <p className="text-xs text-neutral-600">{hint}</p>}
+  </div>
 )
 
 export const inputClassName =
-  'w-full rounded border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/30 disabled:opacity-60'
+  'w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3.5 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 disabled:cursor-not-allowed disabled:opacity-50'
 
-export const tableClassName = 'w-full min-w-[760px] text-sm'
+export const tableClassName = 'w-full text-sm'
 
 export const ErrorBanner: React.FC<{ message: string | null; className?: string }> = ({ message, className }) => {
   if (!message) return null
   return (
-    <div
-      role="alert"
-      aria-live="polite"
-      className={cx('rounded border border-rose-500/30 bg-rose-950/30 px-3 py-2 text-sm text-rose-200', className)}
-    >
+    <div role="alert" className={cx('rounded-lg bg-red-500/10 px-4 py-3 text-sm text-red-400', className)}>
       {message}
     </div>
   )

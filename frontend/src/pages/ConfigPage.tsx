@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChevronDown, FileDown, Play, Save, Upload } from 'lucide-react'
 import { API_BASE, fetchApi, fetchJson, readApiError } from '../api'
-import { Button, CollapsiblePanel, ErrorBanner, Field, Panel, StatusBadge, cx, inputClassName } from '../components/ui'
+import { Button, Card, CollapsiblePanel, ErrorBanner, Field, StatusBadge, cx, inputClassName } from '../components/ui'
 import { useProtectedApiAccess } from '../hooks/useProtectedApiAccess'
 
 type Template = {
@@ -674,17 +674,19 @@ const ConfigPage: React.FC = () => {
   }
 
   return (
-    <div className="space-y-4">
+    <div>
       <datalist id="recent-models">
         {modelOptions.map((model) => <option key={model} value={model} />)}
       </datalist>
 
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-medium text-slate-200">配置</h1>
-        <div className="flex gap-2">
+      {/* Page Header - Linear style */}
+      <div className="mb-8 flex items-center justify-between">
+        <h1 className="text-lg font-semibold text-neutral-50">新建比赛</h1>
+        <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={autoFillNames}>自动命名</Button>
           <Button variant="ghost" size="sm" disabled={isStarting} onClick={() => resetToConfig(defaultConfig())}>重置</Button>
-          <Button variant="primary" icon={<Play className="h-4 w-4" />} loading={isStarting} disabled={!canStart || apiActionsDisabled} onClick={startMatch}>
+          <div className="mx-2 h-4 w-px bg-neutral-800" />
+          <Button variant="primary" icon={<Play className="h-3.5 w-3.5" />} loading={isStarting} disabled={!canStart || apiActionsDisabled} onClick={startMatch}>
             {isStarting ? '创建中...' : '开始比赛'}
           </Button>
         </div>
@@ -694,44 +696,49 @@ const ConfigPage: React.FC = () => {
       <ErrorBanner message={importError} />
       <ErrorBanner message={!protectedApi.loading && !protectedApi.ready ? protectedApi.message : null} />
       {templateNotice && (
-        <div role="status" className="rounded border border-emerald-500/30 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-200">
+        <div role="status" className="mb-4 rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-emerald-400">
           {templateNotice}
         </div>
       )}
 
-      <Panel>
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex gap-1">
-            <Button size="sm" variant={config.mode === 'awd' ? 'primary' : 'secondary'} onClick={() => resetToConfig(defaultConfig())}>AWD</Button>
-            <Button size="sm" variant={config.mode === 'werewolf' ? 'primary' : 'secondary'} onClick={() => resetToConfig(werewolfConfig())}>狼人杀</Button>
-          </div>
+      {/* Mode Selection - Linear style section */}
+      <div className="mb-6">
+        <label className="mb-2 block text-xs font-medium text-neutral-500">比赛模式</label>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className={cx(
+              'rounded-lg px-4 py-2 text-sm font-medium transition-colors',
+              config.mode === 'awd'
+                ? 'bg-neutral-100 text-neutral-900'
+                : 'text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200',
+            )}
+            onClick={() => resetToConfig(defaultConfig())}
+          >
+            AWD 攻防
+          </button>
+          <button
+            type="button"
+            className={cx(
+              'rounded-lg px-4 py-2 text-sm font-medium transition-colors',
+              config.mode === 'werewolf'
+                ? 'bg-neutral-100 text-neutral-900'
+                : 'text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200',
+            )}
+            onClick={() => resetToConfig(werewolfConfig())}
+          >
+            狼人杀
+          </button>
 
-          {isWerewolf ? (
-            <div className="flex flex-wrap gap-2">
-              {WEREWOLF_DECKS.map((deck) => (
-                <button
-                  key={deck.id}
-                  type="button"
-                  className={cx(
-                    'rounded px-3 py-1.5 text-xs transition',
-                    config.werewolfBoard === deck.id
-                      ? 'bg-cyan-600 text-white'
-                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700',
-                  )}
-                  onClick={() => update('werewolfBoard', deck.id)}
-                >
-                  {deck.name}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
+          {!isWerewolf && (
+            <>
+              <div className="mx-1 h-4 w-px bg-neutral-800" />
               <select
-                className={cx(inputClassName, 'h-8 w-48 text-xs')}
+                className="rounded-lg bg-transparent px-2 py-1.5 text-sm text-neutral-400 outline-none"
                 value={selectedTemplate}
                 onChange={(e) => applyTemplate(e.target.value)}
               >
-                <option value="">选择模板</option>
+                <option value="">模板</option>
                 {templates.map((t) => (
                   <option key={t.id} value={t.id}>{t.name}</option>
                 ))}
@@ -739,37 +746,68 @@ const ConfigPage: React.FC = () => {
               <Button size="sm" variant="ghost" onClick={() => setShowSave(true)}>保存</Button>
               <Button size="sm" variant="ghost" loading={isImportingTemplate} onClick={() => fileRef.current?.click()}>导入</Button>
               <input ref={fileRef} type="file" accept="application/json" className="hidden" onChange={onImport} />
-            </div>
+            </>
           )}
-        </div>
-      </Panel>
 
-      <Panel>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="赛事名称" className="sm:col-span-2 lg:col-span-1">
-            <input className={inputClassName} value={config.matchName} onChange={(e) => update('matchName', e.target.value)} />
-          </Field>
-          {!isWerewolf && (
+          {isWerewolf && (
             <>
-              <Field label="总时长（分钟）">
-                <input type="number" min={1} className={inputClassName} value={config.totalDuration} onChange={(e) => update('totalDuration', Number(e.target.value))} />
-              </Field>
-              <Field label="防御（分钟）">
-                <input type="number" min={0} className={inputClassName} value={config.defenseDuration} onChange={(e) => update('defenseDuration', Number(e.target.value))} />
-              </Field>
-              <Field label="循环次数">
-                <input type="number" min={1} className={inputClassName} value={config.repeatCount} onChange={(e) => update('repeatCount', Math.max(1, Number(e.target.value) || 1))} />
-              </Field>
+              <div className="mx-1 h-4 w-px bg-neutral-800" />
+              {WEREWOLF_DECKS.map((deck) => (
+                <button
+                  key={deck.id}
+                  type="button"
+                  className={cx(
+                    'rounded-lg px-3 py-1.5 text-xs font-medium transition-colors',
+                    config.werewolfBoard === deck.id
+                      ? 'bg-neutral-800 text-neutral-200'
+                      : 'text-neutral-500 hover:text-neutral-300',
+                  )}
+                  onClick={() => update('werewolfBoard', deck.id)}
+                >
+                  {deck.name}
+                </button>
+              ))}
             </>
           )}
         </div>
-      </Panel>
+      </div>
 
-      <CollapsiblePanel title="LLM 配置">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="服务商">
+      {/* Basic Info - Linear style form */}
+      <div className="mb-6 grid grid-cols-4 gap-4">
+        <div className="col-span-2">
+          <label className="mb-1.5 block text-xs font-medium text-neutral-500">赛事名称</label>
+          <input
+            className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
+            value={config.matchName}
+            onChange={(e) => update('matchName', e.target.value)}
+            placeholder="输入比赛名称"
+          />
+        </div>
+        {!isWerewolf && (
+          <>
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-neutral-500">总时长（分钟）</label>
+              <input type="number" min={1} className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.totalDuration} onChange={(e) => update('totalDuration', Number(e.target.value))} />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-neutral-500">防御时长（分钟）</label>
+              <input type="number" min={0} className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.defenseDuration} onChange={(e) => update('defenseDuration', Number(e.target.value))} />
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* LLM Config - Linear style collapsible */}
+      <details className="mb-6 group">
+        <summary className="flex cursor-pointer items-center gap-2 text-sm font-medium text-neutral-400 hover:text-neutral-200">
+          <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
+          LLM 配置
+        </summary>
+        <div className="mt-4 grid grid-cols-2 gap-4">
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-neutral-500">服务商</label>
             <select
-              className={inputClassName}
+              className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
               value={(() => {
                 const matched = LLM_PRESETS.find((p) => p.baseUrl === config.llmBaseUrl)
                 return matched ? matched.id : 'custom'
@@ -791,60 +829,70 @@ const ConfigPage: React.FC = () => {
                 <option key={p.id} value={p.id}>{p.label}</option>
               ))}
             </select>
-          </Field>
-          <Field label="Base URL">
-            <input className={inputClassName} value={config.llmBaseUrl} onChange={(e) => update('llmBaseUrl', e.target.value)} placeholder="https://api.deepseek.com" />
-          </Field>
-          <Field label="API Key">
-            <input type="password" className={inputClassName} value={config.llmApiKey ?? ''} onChange={(e) => update('llmApiKey', e.target.value)} />
-          </Field>
-          <div className="flex items-end gap-2">
-            <Field label="代理 URL" className="flex-1">
-              <input className={inputClassName} value={config.llmProxy ?? ''} onChange={(e) => update('llmProxy', e.target.value)} />
-            </Field>
-            <Button
-              variant="secondary"
-              size="sm"
-              loading={testingGlobalLlm}
-              disabled={apiActionsDisabled}
-              onClick={() => testLlm(config.llmBaseUrl, config.llmApiKey ?? '', config.llmProxy, config.players[0]?.model || DEFAULT_LLM_MODEL, true)}
-            >
-              测试
-            </Button>
           </div>
-          {testStatus.global && (
-            <div className="sm:col-span-2">
-              <StatusBadge tone={statusTone(testStatus.global.success)}>{testStatus.global.message}</StatusBadge>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-neutral-500">Base URL</label>
+            <input className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.llmBaseUrl} onChange={(e) => update('llmBaseUrl', e.target.value)} placeholder="https://api.deepseek.com" />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-neutral-500">API Key</label>
+            <input type="password" className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.llmApiKey ?? ''} onChange={(e) => update('llmApiKey', e.target.value)} />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-neutral-500">代理 URL</label>
+            <div className="flex gap-2">
+              <input className="flex-1 rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.llmProxy ?? ''} onChange={(e) => update('llmProxy', e.target.value)} />
+              <Button variant="secondary" size="sm" loading={testingGlobalLlm} disabled={apiActionsDisabled}
+                onClick={() => testLlm(config.llmBaseUrl, config.llmApiKey ?? '', config.llmProxy, config.players[0]?.model || DEFAULT_LLM_MODEL, true)}>
+                测试
+              </Button>
             </div>
-          )}
+            {testStatus.global && <StatusBadge tone={statusTone(testStatus.global.success)} className="mt-1.5">{testStatus.global.message}</StatusBadge>}
+          </div>
         </div>
-      </CollapsiblePanel>
+      </details>
 
-      <Panel title="选手">
-        <div className="mb-3 flex items-center gap-2">
-          {!isWerewolf && (
-            <div className="flex gap-1">
-              {[2, 4, 6, 8].map((n) => (
-                <Button key={n} size="sm" variant={config.playerCount === n ? 'primary' : 'secondary'} onClick={() => update('playerCount', n)}>{n}</Button>
-              ))}
-            </div>
-          )}
+      {/* Players - Linear style list */}
+      <div className="mb-6">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="text-sm font-medium text-neutral-400">选手</span>
+            {!isWerewolf && (
+              <div className="flex items-center gap-1">
+                {[2, 4, 6, 8].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    className={cx(
+                      'rounded-md px-2 py-0.5 text-xs font-medium transition-colors',
+                      config.playerCount === n
+                        ? 'bg-neutral-800 text-neutral-200'
+                        : 'text-neutral-600 hover:text-neutral-400',
+                    )}
+                    onClick={() => update('playerCount', n)}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <Button size="sm" variant="ghost" onClick={useSameModelAll}>统一模型</Button>
         </div>
 
-        <div className="space-y-2">
+        <div className="divide-y divide-neutral-800/50 rounded-xl border border-neutral-800/50">
           {config.players.map((player, idx) => {
             const expanded = expandedPlayers.has(player.id)
             const playerStatus = testStatus[player.id]
             return (
-              <div key={player.id} className="rounded border border-slate-800 bg-slate-950/50">
+              <div key={player.id}>
                 <div
-                  className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-slate-800/50"
+                  className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-neutral-800/20"
                   onClick={() => togglePlayerExpanded(player.id)}
                 >
-                  <span className="w-6 text-center text-xs text-slate-500">{player.id}</span>
+                  <span className="w-6 text-center text-xs font-medium text-neutral-600">{player.id}</span>
                   <input
-                    className={cx(inputClassName, 'h-7 flex-1 border-0 bg-transparent px-0 focus:ring-0')}
+                    className="flex-1 bg-transparent text-sm text-neutral-200 outline-none placeholder:text-neutral-600"
                     value={player.name}
                     onChange={(e) => updatePlayer(idx, { name: e.target.value })}
                     onClick={(e) => e.stopPropagation()}
@@ -852,7 +900,7 @@ const ConfigPage: React.FC = () => {
                   />
                   <input
                     list="recent-models"
-                    className={cx(inputClassName, 'h-7 w-48 border-0 bg-transparent px-0 text-right focus:ring-0')}
+                    className="w-56 bg-transparent text-right text-sm text-neutral-500 outline-none placeholder:text-neutral-700"
                     value={player.model}
                     onChange={(e) => updatePlayer(idx, { model: e.target.value })}
                     onFocus={() => setModelApplyTarget(player.id)}
@@ -871,42 +919,46 @@ const ConfigPage: React.FC = () => {
                   >
                     测试
                   </Button>
-                  <ChevronDown className={cx('h-4 w-4 text-slate-500 transition', expanded && 'rotate-180')} />
+                  <ChevronDown className={cx('h-4 w-4 text-neutral-600 transition-transform', expanded && 'rotate-180')} />
                 </div>
 
                 {expanded && (
-                  <div className="border-t border-slate-800 px-3 py-3">
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <Field label="Base URL">
+                  <div className="border-t border-neutral-800/50 bg-neutral-900/50 px-4 py-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="mb-1.5 block text-xs font-medium text-neutral-500">Base URL</label>
                         <input
-                          className={inputClassName}
+                          className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
                           placeholder={config.llmBaseUrl || DEFAULT_LLM_BASE_URL}
                           value={player.baseUrl ?? ''}
                           onChange={(e) => updatePlayer(idx, { baseUrl: e.target.value })}
                         />
-                      </Field>
-                      <Field label="API Key">
-                        <input type="password" className={inputClassName} value={player.apiKey ?? ''} onChange={(e) => updatePlayer(idx, { apiKey: e.target.value })} />
-                      </Field>
-                      <Field label="后端">
-                        <select className={inputClassName} value={player.backendType} onChange={(e) => updatePlayer(idx, { backendType: e.target.value as Player['backendType'] })}>
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-xs font-medium text-neutral-500">API Key</label>
+                        <input type="password" className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={player.apiKey ?? ''} onChange={(e) => updatePlayer(idx, { apiKey: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-xs font-medium text-neutral-500">后端</label>
+                        <select className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={player.backendType} onChange={(e) => updatePlayer(idx, { backendType: e.target.value as Player['backendType'] })}>
                           <option value="openclaw">OpenClaw</option>
                           <option value="hermes">Hermes</option>
                         </select>
-                      </Field>
+                      </div>
                       {player.backendType === 'hermes' && (
-                        <Field label="Hermes 镜像">
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-neutral-500">Hermes 镜像</label>
                           <input
-                            className={inputClassName}
+                            className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
                             placeholder="hermes-agent:latest"
                             value={player.backendConfig.image ?? ''}
                             onChange={(e) => updatePlayer(idx, { backendConfig: { ...player.backendConfig, image: e.target.value } })}
                           />
-                        </Field>
+                        </div>
                       )}
                     </div>
                     {playerStatus && (
-                      <div className="mt-2">
+                      <div className="mt-3">
                         <StatusBadge tone={statusTone(playerStatus.success)}>{playerStatus.message}</StatusBadge>
                       </div>
                     )}
@@ -916,59 +968,67 @@ const ConfigPage: React.FC = () => {
             )
           })}
         </div>
-      </Panel>
+      </div>
 
-      <CollapsiblePanel title="高级配置">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      {/* Advanced - Linear style collapsible */}
+      <details className="group">
+        <summary className="flex cursor-pointer items-center gap-2 text-sm font-medium text-neutral-500 hover:text-neutral-300">
+          <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
+          高级配置
+        </summary>
+        <div className="mt-4 grid grid-cols-3 gap-4">
           {!isWerewolf && (
             <>
-              <Field label="攻击得分">
-                <input type="number" className={inputClassName} value={config.scoring?.attackSuccess ?? 100} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), attackSuccess: Number(e.target.value) } }))} />
-              </Field>
-              <Field label="防御失分">
-                <input type="number" className={inputClassName} value={config.scoring?.defenseFailure ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), defenseFailure: Number(e.target.value) } }))} />
-              </Field>
-              <Field label="SLA 失分">
-                <input type="number" className={inputClassName} value={config.scoring?.slaViolation ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), slaViolation: Number(e.target.value) } }))} />
-              </Field>
-              <Field label="Flag 刷新（分钟）">
-                <input type="number" min={1} className={inputClassName} value={config.flagsRefreshInterval ?? 5} onChange={(e) => update('flagsRefreshInterval', Number(e.target.value))} />
-              </Field>
-              <Field label="Target 镜像">
-                <input className={inputClassName} value={config.targetImage ?? ''} onChange={(e) => update('targetImage', e.target.value)} />
-              </Field>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-neutral-500">攻击得分</label>
+                <input type="number" className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.scoring?.attackSuccess ?? 100} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), attackSuccess: Number(e.target.value) } }))} />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-neutral-500">防御失分</label>
+                <input type="number" className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.scoring?.defenseFailure ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), defenseFailure: Number(e.target.value) } }))} />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-neutral-500">SLA 失分</label>
+                <input type="number" className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.scoring?.slaViolation ?? -50} onChange={(e) => setConfig((c) => ({ ...c, scoring: { ...(c.scoring ?? { attackSuccess: 100, defenseFailure: -50, slaViolation: -50 }), slaViolation: Number(e.target.value) } }))} />
+              </div>
             </>
           )}
-          <Field label="Agent 镜像">
-            <input className={inputClassName} value={config.agentImage ?? ''} onChange={(e) => update('agentImage', e.target.value)} />
-          </Field>
+          {!isWerewolf && (
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-neutral-500">Flag 刷新（分钟）</label>
+              <input type="number" min={1} className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.flagsRefreshInterval ?? 5} onChange={(e) => update('flagsRefreshInterval', Number(e.target.value))} />
+            </div>
+          )}
+          {!isWerewolf && (
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-neutral-500">Target 镜像</label>
+              <input className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.targetImage ?? ''} onChange={(e) => update('targetImage', e.target.value)} />
+            </div>
+          )}
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-neutral-500">Agent 镜像</label>
+            <input className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={config.agentImage ?? ''} onChange={(e) => update('agentImage', e.target.value)} />
+          </div>
         </div>
-      </CollapsiblePanel>
+      </details>
 
+      {/* Save Modal */}
       {showSave && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="save-template-title"
-            className="w-full max-w-md rounded-lg border border-slate-700 bg-slate-950 p-5 shadow-2xl"
-          >
-            <h2 id="save-template-title" className="text-lg font-semibold text-white">保存为模板</h2>
-            <div className="mt-4 space-y-3">
-              <Field label="名称">
-                <input className={inputClassName} value={saveName} onChange={(e) => setSaveName(e.target.value)} />
-              </Field>
-              <Field label="描述">
-                <textarea className={cx(inputClassName, 'min-h-[90px]')} value={saveDesc} onChange={(e) => setSaveDesc(e.target.value)} />
-              </Field>
-              <div className="flex justify-end gap-2">
-                <Button variant="secondary" disabled={isSavingTemplate} onClick={() => setShowSave(false)}>取消</Button>
-                <Button
-                  variant="primary"
-                  icon={<FileDown className="h-4 w-4" />}
-                  loading={isSavingTemplate}
-                  onClick={saveTemplate}
-                >
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-xl border border-neutral-800 bg-neutral-900 p-6">
+            <h2 className="text-base font-semibold text-neutral-100">保存为模板</h2>
+            <div className="mt-5 space-y-4">
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-neutral-500">名称</label>
+                <input className="w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" value={saveName} onChange={(e) => setSaveName(e.target.value)} />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-neutral-500">描述</label>
+                <textarea className="w-full resize-none rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-600" rows={3} value={saveDesc} onChange={(e) => setSaveDesc(e.target.value)} />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="ghost" disabled={isSavingTemplate} onClick={() => setShowSave(false)}>取消</Button>
+                <Button variant="primary" loading={isSavingTemplate} onClick={saveTemplate}>
                   {isSavingTemplate ? '保存中...' : '保存'}
                 </Button>
               </div>

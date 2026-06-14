@@ -487,7 +487,6 @@ class AgentClient:
     async def _reload_gateway_config(self, container_name: str) -> InitResult:
         """Send SIGUSR1 to the Gateway process to trigger config hot-reload."""
         return await self._restart_gateway_container(container_name)
-        return InitResult(True)
 
     async def _config_file_exists(self, container_name: str) -> bool:
         result = await self._exec(
@@ -879,17 +878,6 @@ class AgentClient:
         """
         if timeout is None:
             timeout = self.agent_timeout
-
-        if message_mode == MESSAGE_MODE_BUFFERED:
-            return await self._send_message_locked(
-                session,
-                message,
-                timeout=timeout,
-                stream_callback=stream_callback,
-                message_kind=message_kind,
-                message_mode=message_mode,
-                drain_buffered_after=drain_buffered_after,
-            )
 
         return await self._send_message_locked(
             session,

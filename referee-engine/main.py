@@ -395,7 +395,10 @@ class MatchState:
 
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._persist_event_background(event_type, public_data, now))
+            task = loop.create_task(self._persist_event_background(event_type, public_data, now))
+            task.add_done_callback(
+                lambda t: t.exception() if not t.cancelled() else None
+            )
         except RuntimeError:
             logger.warning(f"[{self.match_id}] Event {event_type} not persisted (no running loop)")
 
@@ -2264,13 +2267,11 @@ class RefereeEngine:
         match.add_event("CONTAINERS_CREATED", {
             "players": {
                 pid: {
-                    "target_ip": p.target_ip,
-                    "agent_container": p.container_name,
-                    "target_container": p.target_container,
-                    "network": p.network_name,
+                    "player_id": pid,
+                    "status": "ready",
                     "isolated": True,
                 }
-                for pid, p in match.players.items()
+                for pid in match.players
             }
         })
 

@@ -73,7 +73,7 @@ type TestLlmResponse = {
 
 const RECENT_MODELS_STORAGE_KEY = 'OPENCLAW_RECENT_MODELS'
 const MAX_RECENT_MODELS = 20
-const DEFAULT_LLM_BASE_URL = 'https://api.findmini.top/gpt'
+const DEFAULT_LLM_BASE_URL = ''
 const DEFAULT_LLM_MODEL = 'gpt-5.5'
 type WerewolfBoard = ConfigState['werewolfBoard']
 const WEREWOLF_DECKS = [
@@ -683,13 +683,13 @@ const ConfigPage: React.FC = () => {
       <div className="mb-8">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-slate-100">新建比赛</h1>
-            <p className="mt-1 text-sm text-slate-400">配置选手、模型和赛制，开始一场可观战的比赛</p>
+            <h1 className="text-2xl font-bold text-white">新建比赛</h1>
+            <p className="mt-1 text-sm text-[#8888aa]">配置选手、模型和赛制，开始一场可观战的比赛</p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="ghost" size="sm" onClick={autoFillNames}>自动命名</Button>
             <Button variant="ghost" size="sm" disabled={isStarting} onClick={() => resetToConfig(defaultConfig())}>重置</Button>
-            <div className="mx-2 h-5 w-px bg-slate-700" />
+            <div className="mx-2 h-5 w-px bg-[#2a2a3a]" />
             <Button variant="primary" icon={<Play className="h-4 w-4" />} loading={isStarting} disabled={!canStart || apiActionsDisabled} onClick={startMatch}>
               {isStarting ? '创建中...' : '开始比赛'}
             </Button>
@@ -708,16 +708,16 @@ const ConfigPage: React.FC = () => {
 
       {/* Mode Selection */}
       <Card className="mb-5">
-        <label className="mb-3 block text-xs font-medium text-slate-400 uppercase tracking-wider">比赛模式</label>
+        <label className="mb-3 block text-xs font-medium text-[#8888aa] uppercase tracking-wider">比赛模式</label>
         <div className="flex items-center gap-3">
-          <div className="flex gap-1.5 p-1 bg-slate-900/60 rounded-xl">
+          <div className="flex gap-1.5 p-1 bg-[#16162a]/60 rounded-xl">
             <button
               type="button"
               className={cx(
                 'rounded-md px-4 py-2 text-sm font-medium transition-all',
                 config.mode === 'awd'
-                  ? 'bg-indigo-500 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200',
+                  ? 'bg-[#B19CD9] text-white shadow-sm'
+                  : 'text-[#8888aa] hover:text-[#D3D3D3]',
               )}
               onClick={() => resetToConfig(defaultConfig())}
             >
@@ -728,8 +728,8 @@ const ConfigPage: React.FC = () => {
               className={cx(
                 'rounded-md px-4 py-2 text-sm font-medium transition-all',
                 config.mode === 'werewolf'
-                  ? 'bg-indigo-500 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200',
+                  ? 'bg-[#B19CD9] text-white shadow-sm'
+                  : 'text-[#8888aa] hover:text-[#D3D3D3]',
               )}
               onClick={() => resetToConfig(werewolfConfig())}
             >
@@ -766,8 +766,8 @@ const ConfigPage: React.FC = () => {
                   className={cx(
                     'rounded-lg px-3 py-1.5 text-xs font-medium transition-colors',
                     config.werewolfBoard === deck.id
-                      ? 'bg-indigo-500/20 text-indigo-300'
-                      : 'text-slate-500 hover:text-slate-300',
+                      ? 'bg-[#B19CD9]/20 text-[#B19CD9]'
+                      : 'text-[#6a6a8a] hover:text-[#D3D3D3]',
                   )}
                   onClick={() => update('werewolfBoard', deck.id)}
                 >
@@ -872,17 +872,17 @@ const ConfigPage: React.FC = () => {
           <Button size="sm" variant="ghost" onClick={useSameModelAll}>统一模型</Button>
         </div>
 
-        <div className="divide-y divide-slate-700/30 rounded-xl bg-slate-800/40 border border-slate-700/30 overflow-hidden">
+        <div className="divide-y divide-[#2a2a3a]/30 rounded-xl bg-[#16162a]/40 border border-[#2a2a3a]/30 overflow-hidden">
           {config.players.map((player, idx) => {
             const expanded = expandedPlayers.has(player.id)
             const playerStatus = testStatus[player.id]
             return (
               <div key={player.id}>
                 <div
-                  className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-slate-800/60 transition-colors"
+                  className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-[#2a2a3a]/60 transition-colors"
                   onClick={() => togglePlayerExpanded(player.id)}
                 >
-                  <span className="w-6 text-center text-xs font-medium text-slate-500">{player.id}</span>
+                  <span className="w-6 text-center text-xs font-medium text-[#6a6a8a]">{player.id}</span>
                   <input
                     className="flex-1 bg-transparent text-sm text-neutral-200 outline-none placeholder:text-neutral-600"
                     value={player.name}
@@ -915,7 +915,7 @@ const ConfigPage: React.FC = () => {
                 </div>
 
                 {expanded && (
-                  <div className="border-t border-slate-700/30 bg-slate-800/30 px-4 py-4">
+                  <div className="border-t border-[#2a2a3a]/30 bg-[#16162a]/30 px-4 py-4">
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <label className="mb-1.5 block text-xs font-medium text-slate-500">Base URL</label>
@@ -1003,8 +1003,8 @@ const ConfigPage: React.FC = () => {
       {/* Save Modal */}
       {showSave && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-6">
-            <h2 className="text-base font-semibold text-slate-100">保存为模板</h2>
+          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-xl bg-[#1e1e2e] border border-[#2a2a3a] shadow-2xl p-6">
+            <h2 className="text-base font-semibold text-white">保存为模板</h2>
             <div className="mt-5 space-y-4">
               <div>
                 <label className="mb-1.5 block text-xs font-medium text-slate-500">名称</label>

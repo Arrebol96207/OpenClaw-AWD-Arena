@@ -489,7 +489,7 @@ class SLAChecker:
                     })
                 
             except Exception as e:
-                logger.error(f"SLA check error: {e}")
+                logger.error(f"SLA check error: {e}", exc_info=True)
             
             await asyncio.sleep(self.check_interval)
     

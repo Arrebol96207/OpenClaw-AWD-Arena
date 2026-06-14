@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import sqlite3
-import threading
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -19,9 +18,6 @@ DB_LOCK_ERROR_MARKERS = (
     "database is busy",
 )
 T = TypeVar("T")
-
-_connection_lock = threading.Lock()
-_cached_connection: Optional[sqlite3.Connection] = None
 
 
 def _is_transient_sqlite_lock_error(exc: BaseException) -> bool:
@@ -49,14 +45,6 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
     return conn
-
-
-def _get_cached_connection() -> sqlite3.Connection:
-    global _cached_connection
-    with _connection_lock:
-        if _cached_connection is None:
-            _cached_connection = _connect()
-        return _cached_connection
 
 
 def _to_iso(value: Optional[datetime]) -> Optional[str]:
@@ -125,7 +113,7 @@ def _scrub_persisted_submissions(conn: sqlite3.Connection) -> None:
 
 
 def _init_db_sync() -> None:
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         conn.execute(
             """
@@ -203,7 +191,7 @@ def _init_db_sync() -> None:
 
 def _save_match_sync(match_id: str, status: str, config_dict: Dict[str, Any], created_at: datetime) -> None:
     stored_config = _sanitize_config_for_storage(config_dict)
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         conn.execute(
             """
@@ -222,7 +210,7 @@ def _save_match_sync(match_id: str, status: str, config_dict: Dict[str, Any], cr
 
 
 def _update_match_status_sync(match_id: str, status: str, finished_at: Optional[datetime]) -> None:
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         conn.execute(
             """
@@ -238,7 +226,7 @@ def _update_match_status_sync(match_id: str, status: str, finished_at: Optional[
 
 
 def _save_event_sync(match_id: str, event_type: str, data: Dict[str, Any], timestamp: datetime) -> None:
-    conn = _get_cached_connection()
+    conn = _connect()
     conn.execute(
         """
         INSERT INTO events(match_id, event_type, data_json, timestamp)
@@ -262,7 +250,7 @@ def _save_loop_sync(
     stopped_at: Optional[datetime] = None,
 ) -> None:
     stored_config = _sanitize_config_for_storage(config_dict)
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         conn.execute(
             """
@@ -308,7 +296,7 @@ def _save_loop_sync(
 
 
 def _get_loop_sync(loop_id: str) -> Optional[Dict[str, Any]]:
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         row = conn.execute(
             """
@@ -338,7 +326,7 @@ def _get_loop_sync(loop_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _list_loops_sync() -> List[Dict[str, Any]]:
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         rows = conn.execute(
             """
@@ -368,7 +356,7 @@ def _list_loops_sync() -> List[Dict[str, Any]]:
 
 
 def _load_all_matches_sync() -> List[Dict[str, Any]]:
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         matches = conn.execute(
             """
@@ -417,7 +405,7 @@ def _load_all_matches_sync() -> List[Dict[str, Any]]:
 
 
 def _save_submission_sync(match_id: str, submission: Dict[str, Any]) -> None:
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         conn.execute(
             """
@@ -456,7 +444,7 @@ def _save_submission_sync(match_id: str, submission: Dict[str, Any]) -> None:
 
 
 def _load_submissions_sync(match_id: str) -> List[Dict[str, Any]]:
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         rows = conn.execute(
             """
@@ -512,7 +500,7 @@ async def load_all_matches() -> List[Dict[str, Any]]:
 
 
 def _list_matches_summary_sync() -> List[Dict[str, Any]]:
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         rows = conn.execute(
             """
@@ -639,7 +627,7 @@ def _list_matches_summary_sync() -> List[Dict[str, Any]]:
 
 def _delete_match_sync(match_id: str) -> int:
     """Delete a match and all its events/submissions. Returns rows affected on matches table."""
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         conn.execute("DELETE FROM events WHERE match_id = ?", (match_id,))
         conn.execute("DELETE FROM submissions WHERE match_id = ?", (match_id,))
@@ -654,7 +642,7 @@ def _prune_old_matches_sync(retention_days: int) -> int:
     """Delete finished/aborted/error matches older than retention_days. Returns count deleted."""
     if retention_days <= 0:
         return 0
-    conn = _get_cached_connection()
+    conn = _connect()
     try:
         cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat()
         rows = conn.execute(

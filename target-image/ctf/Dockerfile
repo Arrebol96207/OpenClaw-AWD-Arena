@@ -2,7 +2,7 @@ FROM node:20-alpine
 
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
     apk add --no-cache bash curl iputils sqlite python3 tzdata \
-    supervisor openssh-server shadow busybox-suid
+    supervisor openssh-server shadow
 
 ENV TZ=Asia/Shanghai
 ENV MAINTENANCE_USERNAME=defender
@@ -17,7 +17,7 @@ RUN addgroup -S webops && \
     passwd -l root && \
     sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config && \
     sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config && \
-    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && \
     printf '\nAllowUsers defender\nUsePAM no\n' >> /etc/ssh/sshd_config && \
     mkdir -p /run/sshd /var/log/supervisor /home/defender/.ssh /etc/crontabs
 

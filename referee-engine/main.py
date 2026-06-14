@@ -26,6 +26,7 @@ import logging
 import secrets
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import hashlib
@@ -351,7 +352,7 @@ class MatchState:
         )
         self.player_clients: Dict[int, Any] = {}
         self.player_backends: Dict[int, AgentBackendAdapter] = {}
-        self._submission_lock: Optional[asyncio.Lock] = None
+        self._submission_lock = asyncio.Lock()
 
         # 选手状态
         self.players: Dict[int, PlayerState] = {}
@@ -366,6 +367,7 @@ class MatchState:
         self._match_timer_task: Optional[asyncio.Task] = None
 
         self.events: List[Dict] = []
+        self._events_lock = threading.Lock()
         self.agent_logs: Dict[int, str] = {}
         self.player_read_tokens: Dict[int, str] = {}
         self.player_status_checkpoints: Dict[int, Dict[str, Any]] = {}
@@ -374,19 +376,15 @@ class MatchState:
         self.persisted_leaderboard: Dict[int, Dict] = {}
         self.persisted_submissions: List[Dict[str, Any]] = []
         self.player_code_export: Optional[Dict[str, Any]] = None
-        self._player_code_export_lock: Optional[asyncio.Lock] = None
+        self._player_code_export_lock = asyncio.Lock()
         self.resources_destroyed = False
         self._destroy_task: Optional[asyncio.Task] = None
         self.werewolf_state: Optional[WerewolfGameState] = None
 
     def submission_lock(self) -> asyncio.Lock:
-        if self._submission_lock is None:
-            self._submission_lock = asyncio.Lock()
         return self._submission_lock
 
     def player_code_export_lock(self) -> asyncio.Lock:
-        if self._player_code_export_lock is None:
-            self._player_code_export_lock = asyncio.Lock()
         return self._player_code_export_lock
 
     def add_event(self, event_type: str, data: dict):
@@ -399,7 +397,7 @@ class MatchState:
             loop = asyncio.get_running_loop()
             loop.create_task(self._persist_event_background(event_type, public_data, now))
         except RuntimeError:
-            pass
+            logger.warning(f"[{self.match_id}] Event {event_type} not persisted (no running loop)")
 
         return event
 
@@ -425,11 +423,11 @@ class MatchState:
             "timestamp": now.isoformat(),
             "match_id": self.match_id,
         }
-        self.events.append(event)
-        # Cap in-memory events to prevent unbounded memory growth in long matches.
-        # Events are already persisted to the database, so dropping old ones is safe.
-        if len(self.events) > 5000:
-            del self.events[:500]
+        with self._events_lock:
+            self.events.append(event)
+            # Cap in-memory events to prevent unbounded memory growth in long matches.
+            if len(self.events) > 5000:
+                del self.events[:500]
         leaderboard = data.get("leaderboard") if isinstance(data, dict) else None
         if isinstance(leaderboard, dict) and leaderboard:
             existing_values = [entry for entry in self.persisted_leaderboard.values() if isinstance(entry, dict)]
@@ -488,8 +486,9 @@ class RefereeEngine:
         self.player_read_token_store = PlayerReadTokenStore()
         self.player_token_index = self.player_read_token_store.index
         self.loop_runtime_configs: Dict[str, Dict[str, Any]] = {}
-        self.ws_connections: List[WebSocket] = []
+        self.ws_connections: set = set()
         self.ws_subscriptions: Dict[WebSocket, str] = {}
+        self._ws_lock = asyncio.Lock()
         self.ws_ticket_store = WebSocketTicketStore()
         self.commentator = CommentatorService.from_env(logger=logger)
         self._ws_heartbeat_task: Optional[asyncio.Task] = None
@@ -1494,6 +1493,17 @@ class RefereeEngine:
 
     async def start_match(self, config: MatchConfig) -> Dict:
         """Create a match and start its lifecycle asynchronously."""
+        # 检查 player_id 冲突
+        for player in config.players:
+            existing_match_id = self.player_match_index.get(player.id)
+            if existing_match_id:
+                existing_match = self.matches.get(existing_match_id)
+                if existing_match and existing_match.status in ("defense", "attack", "initializing"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Player {player.id} is already active in match {existing_match_id}"
+                    )
+        
         config = self._normalize_loop_config(config)
         loop_state = await self._ensure_loop_record(config)
         match_id = await self.create_match(config)
@@ -1626,12 +1636,22 @@ class RefereeEngine:
             match.player_ssh_key_materials = {}
             await database.update_match_status(match_id, match.status)
             match.add_event("MATCH_ERROR", {"error": f"Docker image not found: {e}", "error_type": "image_not_found"})
+            if not match.resources_destroyed:
+                try:
+                    await self.destroy_match(match_id)
+                except Exception as cleanup_err:
+                    logger.warning(f"[{match_id}] cleanup after ImageNotFound failed: {cleanup_err}")
         except docker.errors.APIError as e:
             logger.error(f"[{match_id}] Docker API error: {e}")
             match.status = "error"
             match.player_ssh_key_materials = {}
             await database.update_match_status(match_id, match.status)
             match.add_event("MATCH_ERROR", {"error": f"Docker API error: {e}", "error_type": "docker_api_error"})
+            if not match.resources_destroyed:
+                try:
+                    await self.destroy_match(match_id)
+                except Exception as cleanup_err:
+                    logger.warning(f"[{match_id}] cleanup after APIError failed: {cleanup_err}")
         except Exception as e:
             logger.error(f"[{match_id}] Failed to start match: {e}")
             match.status = "error"
@@ -2085,6 +2105,9 @@ class RefereeEngine:
                 mem_limit="1g",
                 nano_cpus=1_000_000_000,  # 1 CPU core
                 pids_limit=512,
+                cap_drop=["ALL"],
+                cap_add=["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "NET_BIND_SERVICE"],
+                security_opt=["no-new-privileges:true"],
                 restart_policy=CONTAINER_RESTART_POLICY,
                 labels={
                     "awd.match_id": match.match_id,
@@ -3447,10 +3470,11 @@ class RefereeEngine:
             safe_message = {}
         msg_match_id = safe_message.get("match_id")
 
-        targets = [
-            ws for ws in self.ws_connections
-            if not (msg_match_id and self.ws_subscriptions.get(ws) and self.ws_subscriptions.get(ws) != msg_match_id)
-        ]
+        async with self._ws_lock:
+            targets = [
+                ws for ws in self.ws_connections
+                if not (msg_match_id and self.ws_subscriptions.get(ws) and self.ws_subscriptions.get(ws) != msg_match_id)
+            ]
 
         async def _send(ws):
             try:
@@ -3461,13 +3485,14 @@ class RefereeEngine:
 
         if targets:
             results = await asyncio.gather(*[_send(ws) for ws in targets], return_exceptions=True)
-            for item in results:
-                if isinstance(item, Exception):
-                    continue
-                ws, ok = item
-                if not ok:
-                    self.ws_connections.remove(ws)
-                    self.ws_subscriptions.pop(ws, None)
+            async with self._ws_lock:
+                for item in results:
+                    if isinstance(item, Exception):
+                        continue
+                    ws, ok = item
+                    if not ok:
+                        self.ws_connections.discard(ws)
+                        self.ws_subscriptions.pop(ws, None)
 
         await self._observe_for_commentary(safe_message)
 
@@ -3497,15 +3522,19 @@ class RefereeEngine:
     async def _ws_heartbeat_loop(self):
         while True:
             await asyncio.sleep(30)
+            async with self._ws_lock:
+                targets = list(self.ws_connections)
             dead = []
-            for ws in list(self.ws_connections):
+            for ws in targets:
                 try:
                     await ws.send_json({"type": "ping"})
                 except Exception:
                     dead.append(ws)
-            for ws in dead:
-                self.ws_connections.remove(ws)
-                self.ws_subscriptions.pop(ws, None)
+            if dead:
+                async with self._ws_lock:
+                    for ws in dead:
+                        self.ws_connections.discard(ws)
+                        self.ws_subscriptions.pop(ws, None)
 
 
 template_store = TemplateStore()
@@ -4084,15 +4113,29 @@ async def issue_ws_ticket(request: Request):
     )
 
 
+MAX_WS_CONNECTIONS = 100
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    # Origin 校验防止 CSWSH
+    origin = websocket.headers.get("origin", "")
+    if origin and origin not in _cors_origins:
+        await websocket.close(code=1008, reason="Origin not allowed")
+        return
+
     valid, _status_code, detail = _websocket_auth_is_valid(websocket)
     if not valid:
         await websocket.close(code=1008, reason=detail[:120])
         return
 
+    if len(referee.ws_connections) >= MAX_WS_CONNECTIONS:
+        await websocket.close(code=1013, reason="Too many connections")
+        return
+
     await websocket.accept()
-    referee.ws_connections.append(websocket)
+    async with referee._ws_lock:
+        referee.ws_connections.add(websocket)
     logger.info(f"WebSocket client connected (total: {len(referee.ws_connections)})")
 
     try:
@@ -4111,9 +4154,9 @@ async def websocket_endpoint(websocket: WebSocket):
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect:
-        if websocket in referee.ws_connections:
-            referee.ws_connections.remove(websocket)
-        referee.ws_subscriptions.pop(websocket, None)
+        async with referee._ws_lock:
+            referee.ws_connections.discard(websocket)
+            referee.ws_subscriptions.pop(websocket, None)
         logger.info(f"WebSocket client disconnected (total: {len(referee.ws_connections)})")
 
 

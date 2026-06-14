@@ -485,6 +485,7 @@ class RoundOrchestrator:
             environment=env,
             detach=True,
             mem_limit="2g",
+            nano_cpus=2_000_000_000,  # 2 CPU cores
             pids_limit=512,
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],

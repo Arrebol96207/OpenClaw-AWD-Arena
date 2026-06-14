@@ -7,9 +7,9 @@ export const cx = (...classes: Array<string | false | null | undefined>): string
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'warning'
 
 const buttonVariants: Record<ButtonVariant, string> = {
-  primary: 'bg-indigo-500 text-white hover:bg-indigo-600 shadow-sm',
-  secondary: 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700',
-  ghost: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800',
+  primary: 'bg-[#B19CD9] text-white hover:bg-[#9b84c7] shadow-sm',
+  secondary: 'bg-[#2a2a3a] text-[#D3D3D3] border border-[#3a3a4a] hover:bg-[#333345]',
+  ghost: 'text-[#8888aa] hover:text-[#D3D3D3] hover:bg-[#2a2a3a]',
   danger: 'bg-red-600 text-white hover:bg-red-700 shadow-sm',
   warning: 'bg-amber-600 text-white hover:bg-amber-700 shadow-sm',
 }
@@ -38,7 +38,7 @@ export const Button: React.FC<ButtonProps> = ({
     {...props}
     className={cx(
       'inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition-colors',
-      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400',
+      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#B19CD9]/40',
       'disabled:pointer-events-none disabled:opacity-50',
       size === 'sm' ? 'h-8 px-3 text-xs' : 'h-9 px-4 text-sm',
       buttonVariants[variant],
@@ -56,10 +56,10 @@ export const Card: React.FC<{
   children: React.ReactNode
   action?: React.ReactNode
 }> = ({ title, className, children, action }) => (
-  <div className={cx('rounded-xl bg-slate-800/60 border border-slate-700/50', className)}>
+  <div className={cx('rounded-xl bg-[#1e1e2e]/80 border border-[#2a2a3a]', className)}>
     {(title || action) && (
-      <div className="flex items-center justify-between border-b border-slate-700/50 px-5 py-3">
-        {title && <h3 className="text-sm font-medium text-slate-300">{title}</h3>}
+      <div className="flex items-center justify-between border-b border-[#2a2a3a] px-5 py-3">
+        {title && <h3 className="text-sm font-medium text-[#D3D3D3]">{title}</h3>}
         {action}
       </div>
     )}
@@ -79,19 +79,19 @@ export const CollapsiblePanel: React.FC<{
   const [open, setOpen] = useState(defaultOpen)
 
   return (
-    <div className={cx('rounded-xl bg-slate-800/60 border border-slate-700/50', className)}>
+    <div className={cx('rounded-xl bg-[#1e1e2e]/80 border border-[#2a2a3a]', className)}>
       <button
         type="button"
         className="flex w-full items-center justify-between px-5 py-3 text-left"
         onClick={() => setOpen(!open)}
       >
         <div>
-          <h3 className="text-sm font-medium text-slate-300">{title}</h3>
-          {description && <p className="mt-0.5 text-xs text-slate-500">{description}</p>}
+          <h3 className="text-sm font-medium text-[#D3D3D3]">{title}</h3>
+          {description && <p className="mt-0.5 text-xs text-[#6a6a8a]">{description}</p>}
         </div>
-        <ChevronDown className={cx('h-4 w-4 text-slate-500 transition-transform', open && 'rotate-180')} />
+        <ChevronDown className={cx('h-4 w-4 text-[#6a6a8a] transition-transform', open && 'rotate-180')} />
       </button>
-      {open && <div className="border-t border-slate-700/50 px-5 py-4">{children}</div>}
+      {open && <div className="border-t border-[#2a2a3a] px-5 py-4">{children}</div>}
     </div>
   )
 }
@@ -99,7 +99,7 @@ export const CollapsiblePanel: React.FC<{
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error'
 
 const badgeVariants: Record<BadgeVariant, string> = {
-  default: 'bg-slate-700 text-slate-300',
+  default: 'bg-[#2a2a3a] text-[#D3D3D3]',
   success: 'bg-emerald-500/20 text-emerald-400',
   warning: 'bg-amber-500/20 text-amber-400',
   error: 'bg-red-500/20 text-red-400',
@@ -133,14 +133,14 @@ export const Field: React.FC<{
   children: React.ReactNode
 }> = ({ label, hint, className, children }) => (
   <div className={cx('space-y-1.5', className)}>
-    <label className="block text-xs font-medium text-slate-400">{label}</label>
+    <label className="block text-xs font-medium text-[#8888aa]">{label}</label>
     {children}
-    {hint && <p className="text-xs text-slate-500">{hint}</p>}
+    {hint && <p className="text-xs text-[#6a6a8a]">{hint}</p>}
   </div>
 )
 
 export const inputClassName =
-  'w-full rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:border-indigo-500/50 focus:outline-none focus:ring-1 focus:ring-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50 transition-colors'
+  'w-full rounded-lg border border-[#2a2a3a] bg-[#16162a]/80 px-3 py-2 text-sm text-[#D3D3D3] placeholder:text-[#4a4a6a] focus:border-[#B19CD9]/50 focus:outline-none focus:ring-1 focus:ring-[#B19CD9]/20 disabled:cursor-not-allowed disabled:opacity-50 transition-colors'
 
 export const tableClassName = 'w-full text-sm'
 

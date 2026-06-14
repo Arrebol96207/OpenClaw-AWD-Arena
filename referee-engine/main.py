@@ -3320,18 +3320,21 @@ class RefereeEngine:
         loop = asyncio.get_running_loop()
 
         # 并行停止 + 删除所有容器
-        async def _remove_container(container_name: str):
+        async def _remove_container(container_name: str) -> tuple[str, bool]:
             if not container_name:
-                return
+                return container_name, True
             def _do():
                 try:
                     c = client.containers.get(container_name)
                     c.stop(timeout=10)
                     c.remove()
                     logger.info(f"Removed container: {container_name}")
+                    return True
                 except Exception as e:
                     logger.warning(f"Failed to remove {container_name}: {e}")
-            await loop.run_in_executor(None, _do)
+                    return False
+            success = await loop.run_in_executor(None, _do)
+            return container_name, success
 
         container_names: set[str] = set()
         for player in match.players.values():
@@ -3340,7 +3343,10 @@ class RefereeEngine:
             if match.config.mode != "werewolf" and player.target_container:
                 container_names.add(player.target_container)
         container_tasks = [_remove_container(cname) for cname in container_names]
-        await asyncio.gather(*container_tasks)
+        results = await asyncio.gather(*container_tasks)
+        failed_containers = [name for name, success in results if not success]
+        if failed_containers:
+            logger.warning(f"[{match.match_id}] Failed to remove {len(failed_containers)} containers: {failed_containers}")
 
         # 清理所有网络：每个选手的隔离网络 + arena 共享网络
         network_names: set[str] = set()

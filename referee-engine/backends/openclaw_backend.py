@@ -31,6 +31,10 @@ class OpenClawBackendAdapter(AgentBackendAdapter):
         extra_env = getattr(backend_config, "extra_env", None) if backend_config is not None else None
         llm_api_key, llm_base_url, llm_model, llm_provider_api = self._resolve_player_llm(config, player_config)
 
+        # 安全说明: API Key 通过环境变量传递给 Agent 容器
+        # Agent 可以通过 /proc/1/environ 或 env 命令读取
+        # 已知安全权衡: Agent 需要访问 LLM API，环境变量是最简单的方式
+        # 未来改进: 可以使用 Docker secrets 或 tmpfs 文件传递敏感配置
         environment = {
             "OPENAI_API_KEY": llm_api_key,
             "OPENAI_BASE_URL": llm_base_url,

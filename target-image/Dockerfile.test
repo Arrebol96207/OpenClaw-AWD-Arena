@@ -1,5 +1,7 @@
 FROM node:20-alpine
 
+ARG TEST_USER_PASSWORD=changeme
+
 RUN apk add --no-cache \
     python3 \
     sqlite \
@@ -8,12 +10,12 @@ RUN apk add --no-cache \
     bash
 
 RUN mkdir /var/run/sshd && \
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
     sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
     echo "AllowUsers juice" >> /etc/ssh/sshd_config
 
 RUN adduser -D -s /bin/bash juice && \
-    echo "juice:changeme" | chpasswd
+    echo "juice:${TEST_USER_PASSWORD}" | chpasswd
 
 RUN mkdir -p /app/arena && \
     chown -R juice:juice /app/arena

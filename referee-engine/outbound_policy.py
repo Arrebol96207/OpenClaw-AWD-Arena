@@ -1,4 +1,11 @@
-"""Outbound URL validation for referee-managed external service calls."""
+"""Outbound URL validation for referee-managed external service calls.
+
+安全说明:
+- 此模块验证出站 URL，防止 SSRF 攻击
+- 当 host 是域名时，仅在验证阶段检查，实际请求时 DNS 可能解析到不同 IP
+- DNS Rebinding 攻击需要 REFEREE_ALLOW_PRIVATE_OUTBOUND_URLS=1 才可利用
+- 未来改进: 可以在实际请求时再次验证解析后的 IP
+"""
 
 import os
 import ipaddress

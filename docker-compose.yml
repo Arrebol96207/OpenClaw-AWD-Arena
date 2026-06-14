@@ -1,16 +1,51 @@
+# OpenClaw AWD Arena - Docker Compose 配置
+#
+# 安全架构说明：
+# - Docker Socket 通过 tecnativa/docker-socket-proxy 代理，限制裁判引擎的 Docker API 权限
+# - 裁判引擎和前端运行在 openclaw_net 网络
+# - 每场比赛的靶机/Agent 容器运行在独立的隔离网络中
+# - 靶机容器的 SSRF 漏洞是 CTF 挑战设计，平台已确保网络隔离
+# - 靶机容器无法访问裁判引擎或宿主机
+#
+# 网络隔离：
+# - openclaw_net: 裁判引擎 + 前端 + Docker Socket Proxy
+# - awd_{match_id}_player_{pid}: 每个玩家的隔离网络（靶机 + Agent）
+# - arena_{match_id}: 竞技场网络（攻击阶段连接所有玩家）
+
 services:
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: openclaw-docker-proxy
+    environment:
+      # 仅允许裁判引擎需要的 Docker API 操作
+      # 安全说明：使用 Docker Socket Proxy 限制容器对宿主机 Docker 的访问
+      # 即使裁判引擎被入侵，攻击者也只能执行受限的 Docker 操作
+      CONTAINERS: 1      # 创建/启动/停止/删除容器
+      IMAGES: 1          # 拉取镜像
+      NETWORKS: 1        # 创建/删除网络
+      EXEC: 1            # docker exec
+      VOLUMES: 0         # 不需要卷操作
+      AUTH: 0            # 不需要认证操作
+      SECRETS: 0         # 不需要密钥操作
+      POST: 1            # 允许 POST 请求
+      INFO: 0            # 不需要系统信息
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # 只读挂载
+    restart: unless-stopped
+    networks:
+      - openclaw_net
+
   referee-engine:
     build:
       context: ./referee-engine
     container_name: openclaw-referee
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - referee_data:/app/data
     environment:
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
       - OPENCLAW_DB_PATH=/app/data/openclaw.db
       - OPENCLAW_TEMPLATES_PATH=/app/data/templates.json
       - TZ=Asia/Shanghai
-      # 允许跨域（如果有直接访问后端的需要）
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
       - REFEREE_API_KEY=${REFEREE_API_KEY:-}
       - REFEREE_ALLOW_INSECURE_NO_AUTH=${REFEREE_ALLOW_INSECURE_NO_AUTH:-0}
@@ -31,6 +66,8 @@ services:
       - WEREWOLF_JUDGE_TIMEOUT_SECONDS=${WEREWOLF_JUDGE_TIMEOUT_SECONDS:-45}
     ports:
       - "${REFEREE_BIND_HOST:-127.0.0.1}:8000:8000"
+    depends_on:
+      - docker-socket-proxy
     restart: unless-stopped
     networks:
       - openclaw_net
